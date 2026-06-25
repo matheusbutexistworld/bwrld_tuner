@@ -15,7 +15,7 @@ import math
 from tuner_pro import detectar_frequencia, encontrar_nota
 
 # ==========================================
-# BWRLD TUNER V5 - EXPERT SYSTEM EDITION
+# BWRLD TUNER V6.2 - EXPERT SYSTEM EDITION
 # ==========================================
 FS = 44100
 BLOCKSIZE = 4096
@@ -149,6 +149,7 @@ class BwrldTunerUI(Widget):
         self.freq = 0.0
         self.target = 0.0
         self.cents = 0.0
+        self.raw_cents = 0.0
         self.needle_cents = 0.0
         self.status = "STANDBY"
         self.rms = 0.0
@@ -173,10 +174,8 @@ class BwrldTunerUI(Widget):
         self.string_name = CORDA_MAP.get(note, "")
         self.freq = float(freq)
         self.target = float(target)
-        # In non-CHROMATIC modes allow up to ±100 cents so the needle shows
-        # the full deviation instead of clipping at ±50.
-        clip_range = 50 if self.tuner_mode == "CHROMATIC" else 100
-        self.cents = float(np.clip(cents, -clip_range, clip_range))
+        self.raw_cents = float(cents)
+        self.cents = float(np.clip(cents, -50, 50))
         self.status = status
         self.rms = float(rms)
         self.clarity = float(clarity)
@@ -188,29 +187,32 @@ class BwrldTunerUI(Widget):
         self.freq = 0.0
         self.target = 0.0
         self.cents = 0.0
+        self.raw_cents = 0.0
         self.status = "STANDBY"
         self.rms = float(rms)
         self.clarity = float(clarity)
         self.active = False
 
     def get_status_text(self):
-        """Dynamic tuner state levels (V5 corrected — covers full ±100c range)."""
+        """Status musical baseado em raw_cents. O ponteiro continua limitado em +/-50."""
         if not self.active:
             return "STANDBY"
 
-        a = abs(self.cents)
+        cents_value = getattr(self, "raw_cents", self.cents)
+        a = abs(cents_value)
+
         if a <= 3:
             return "PERFECT"
         if a <= 5:
             return "IN TUNE"
         if a <= 12:
-            return "SLIGHTLY HIGH" if self.cents > 0 else "SLIGHTLY LOW"
+            return "SLIGHTLY HIGH" if cents_value > 0 else "SLIGHTLY LOW"
         if a <= 25:
-            return "HIGH" if self.cents > 0 else "LOW"
+            return "HIGH" if cents_value > 0 else "LOW"
         if a <= 80:
-            return "VERY HIGH" if self.cents > 0 else "VERY LOW"
-        # Beyond ±80 cents — string is far off, needs aggressive action
-        return "DROP A LOT" if self.cents > 0 else "TIGHTEN A LOT"
+            return "VERY HIGH" if cents_value > 0 else "VERY LOW"
+
+        return "DROP A LOT" if cents_value > 0 else "TIGHTEN A LOT"
 
     def get_active_strings(self):
         """Returns string lists mapped dynamically to active instrument/tuning presets."""
@@ -495,12 +497,13 @@ class BwrldTunerUI(Widget):
 
         # 3. Cents Deviation
         if self.active:
-            sign = "+" if self.cents > 0 else ""
-            self._text(f"{sign}{self.cents:.1f} CENTS", cx, cy - 94, 13, main_color, bold=True, cache=False)
+            cents_value = getattr(self, "raw_cents", self.cents)
+            sign = "+" if cents_value > 0 else ""
+            self._text(f"{sign}{cents_value:.1f} CENTS", cx, cy - 94, 13, main_color, bold=True, cache=False)
         else:
             self._text("NO SOURCE", cx, cy - 94, 11, (0.28, 0.31, 0.38, 1.0), bold=True, cache=True)
 
-        # 4. Status Badge Capsule (Precise V5 levels, no emojis)
+        # 4. Status Badge Capsule (Precise V6.2 levels, no emojis)
         badge_w = 170
         badge_h = 24
         bx = cx - badge_w / 2
@@ -605,7 +608,7 @@ class BwrldTunerUI(Widget):
 
     def draw_footer(self, w, h):
         self._line([24, 34, w - 24, 34], (0.15, 0.17, 0.22, 1.0), 1.0)
-        self._text("BWRLD AUDIO ENGINE V5 // EXPERT TUNING MODES ACTIVE", 24, 15, 9, (0.32, 0.35, 0.42, 1.0), bold=True, align="left", cache=True)
+        self._text("BWRLD AUDIO ENGINE V6.2 // EXPERT TUNING MODES ACTIVE", 24, 15, 9, (0.32, 0.35, 0.42, 1.0), bold=True, align="left", cache=True)
         self._text("SR: 44.1 KHZ // BLOCK: 4096 // WIN32 DIRECTSOUND", w - 24, 15, 9, (0.32, 0.35, 0.42, 1.0), bold=True, align="right", cache=True)
 
     def draw(self, dt):
@@ -806,17 +809,15 @@ class BwrldTunerApp(App):
         self.stream.start()
 
     def apply_audio_data(self, dt):
-        # Correction 3: flush stale history whenever the UI requests it
-        # (set by mode switches and preset locks in on_touch_down).
-        if self.ui.needs_history_reset:
-            self.freq_history.clear()
-            self.cents_history.clear()
-            self.ui.needs_history_reset = False
-
         with self.lock:
             data = self.pending
             self.pending = None
             last_signal = self.last_signal_time
+
+        if getattr(self.ui, "needs_history_reset", False):
+            self.freq_history.clear()
+            self.cents_history.clear()
+            self.ui.needs_history_reset = False
 
         if data is None:
             if time.time() - last_signal > 0.75:
