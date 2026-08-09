@@ -29,6 +29,7 @@ from core.gate import GateState, SignalGate
 from core.smoothing import MedianSmoother
 from core.tracking import PitchTracker
 from core.tuner_engine import TunerEngine, TunerResult
+from core.tunings import A4_STANDARD
 
 
 class TunerPipeline:
@@ -47,8 +48,9 @@ class TunerPipeline:
         hold_time: float = 0.75,
         rms_threshold: float = 0.006,
         clarity_threshold: float = 0.18,
+        a4: float = A4_STANDARD,
     ):
-        self._engine = TunerEngine(mode)
+        self._engine = TunerEngine(mode, a4=a4)
         self._gate = SignalGate(
             rms_threshold=rms_threshold,
             clarity_threshold=clarity_threshold,
@@ -76,6 +78,19 @@ class TunerPipeline:
         return self._tracker
 
     # ── configuração ──────────────────────
+    @property
+    def a4(self) -> float:
+        return self._engine.a4
+
+    def set_reference_pitch(self, a4: float) -> None:
+        """Troca a afinação de referência e descarta o histórico.
+
+        Sem o clear, a mediana das leituras da referência antiga arrastaria
+        a nota por meio segundo depois da troca.
+        """
+        self._engine.set_reference_pitch(a4)
+        self._clear_history()
+
     def set_mode(self, mode: str) -> None:
         """Troca o modo e descarta o histórico (evita arrastar leitura antiga)."""
         self._engine.set_mode(mode)

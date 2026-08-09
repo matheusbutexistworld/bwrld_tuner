@@ -36,7 +36,7 @@ def test_drop_d_with_e2_has_large_positive_cents():
 def test_drop_d_with_e2_status_is_drop_a_lot():
     engine = TunerEngine(mode="DROP D")
     result = engine.process_frequency(82.41)
-    assert result.status == "DROP A LOT"
+    assert result.status == "DROP_A_LOT"
 
 def test_drop_d_display_cents_clipped():
     engine = TunerEngine(mode="DROP D")

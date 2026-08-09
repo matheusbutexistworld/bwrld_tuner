@@ -5,20 +5,25 @@ Sem kivy, sem sounddevice. Apenas fórmulas e utilitários de notas/cents.
 """
 import numpy as np
 
-A4 = 440.0
+A4 = 440.0  # Afinação de referência padrão (concert pitch)
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
-def frequency_to_midi(freq: float) -> int:
-    """Converte frequência Hz para número MIDI mais próximo."""
+def frequency_to_midi(freq: float, a4: float = A4) -> int:
+    """Converte frequência Hz para número MIDI mais próximo.
+
+    Args:
+        freq: Frequência em Hz (> 0).
+        a4:   Afinação de referência (440 padrão, 432 e 415 também usadas).
+    """
     if freq <= 0:
         raise ValueError(f"Frequência inválida: {freq}")
-    return round(12 * np.log2(freq / A4) + 69)
+    return round(12 * np.log2(freq / a4) + 69)
 
 
-def note_frequency_from_midi(midi_num: int) -> float:
-    """Retorna a frequência exata de um número MIDI."""
-    return A4 * (2.0 ** ((midi_num - 69) / 12.0))
+def note_frequency_from_midi(midi_num: int, a4: float = A4) -> float:
+    """Retorna a frequência exata de um número MIDI na referência dada."""
+    return a4 * (2.0 ** ((midi_num - 69) / 12.0))
 
 
 def midi_to_note_name(midi_num: int) -> str:
@@ -63,15 +68,20 @@ def find_closest_note(freq: float, notes_dict: dict) -> tuple[str, float]:
     return nota, notes_dict[nota]
 
 
-def find_chromatic_note(freq: float) -> tuple[str, float]:
+def find_chromatic_note(freq: float, a4: float = A4) -> tuple[str, float]:
     """Encontra a nota cromática mais próxima na escala temperada de 12 tons.
+
+    Args:
+        freq: Frequência detectada em Hz.
+        a4:   Afinação de referência. Muda o alvo, não o nome da nota: em
+              A4=432 a nota A4 continua se chamando A4, mas vale 432 Hz.
 
     Returns:
         (note_name, target_freq)
     """
     if freq <= 0:
         return "---", 0.0
-    midi_num = frequency_to_midi(freq)
-    target_freq = note_frequency_from_midi(midi_num)
+    midi_num = frequency_to_midi(freq, a4)
+    target_freq = note_frequency_from_midi(midi_num, a4)
     note_name = midi_to_note_name(midi_num)
     return note_name, target_freq

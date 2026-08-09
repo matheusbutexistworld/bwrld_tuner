@@ -21,7 +21,7 @@ from core.notes import (
     find_chromatic_note,
     find_closest_note,
 )
-from core.tunings import get_notes_dict
+from core.tunings import A4_STANDARD, get_notes_dict
 
 
 # ─────────────────────────────────────────
@@ -39,30 +39,35 @@ class TunerResult:
     active: bool       = False
 
 
-# Mapeamento de nota → nome de corda (fallback genérico)
+# Mapeamento de nota → chave do rótulo de corda (fallback genérico).
+# São chaves de tradução (core/i18n.py), não texto de tela.
 _CORDA_MAP: dict[str, str] = {
-    "E1": "4ª CORDA", "A1": "3ª CORDA",
-    "D2": "2ª CORDA", "G2": "1ª CORDA",
-    "E2": "6ª CORDA", "A2": "5ª CORDA",
-    "D3": "4ª CORDA", "G3": "3ª CORDA",
-    "B3": "2ª CORDA", "E4": "1ª CORDA",
+    "E1": "STRING_4", "A1": "STRING_3",
+    "D2": "STRING_2", "G2": "STRING_1",
+    "E2": "STRING_6", "A2": "STRING_5",
+    "D3": "STRING_4", "G3": "STRING_3",
+    "B3": "STRING_2", "E4": "STRING_1",
 }
 
 
 def _status_from_cents(raw_cents: float) -> str:
-    """Calcula o texto de status a partir do desvio real em cents."""
+    """Chave de status a partir do desvio real em cents.
+
+    Retorna chave de tradução, não texto de tela: quem desenha resolve o
+    idioma. Ver core/i18n.py.
+    """
     a = abs(raw_cents)
     if a <= 3:
         return "PERFECT"
     if a <= 5:
-        return "IN TUNE"
+        return "IN_TUNE"
     if a <= 12:
-        return "SLIGHTLY HIGH" if raw_cents > 0 else "SLIGHTLY LOW"
+        return "SLIGHTLY_HIGH" if raw_cents > 0 else "SLIGHTLY_LOW"
     if a <= 25:
         return "HIGH" if raw_cents > 0 else "LOW"
     if a <= 80:
-        return "VERY HIGH" if raw_cents > 0 else "VERY LOW"
-    return "DROP A LOT" if raw_cents > 0 else "TIGHTEN A LOT"
+        return "VERY_HIGH" if raw_cents > 0 else "VERY_LOW"
+    return "DROP_A_LOT" if raw_cents > 0 else "TIGHTEN_A_LOT"
 
 
 # ─────────────────────────────────────────
@@ -81,12 +86,28 @@ class TunerEngine:
 
     VALID_MODES = {"CHROMATIC", "GUITAR", "DROP D", "BASS", "MANUAL"}
 
-    def __init__(self, mode: str = "CHROMATIC"):
+    def __init__(self, mode: str = "CHROMATIC", a4: float = A4_STANDARD):
         self._mode: str = "CHROMATIC"
         self._locked_note: str | None = None
+        self._a4: float = A4_STANDARD
+        self.set_reference_pitch(a4)
         self.set_mode(mode)
 
     # ── configuração ──────────────────────
+    def set_reference_pitch(self, a4: float) -> None:
+        """Define a afinação de referência (440, 432, 415...).
+
+        Move todos os alvos junto: a razão entre as cordas não muda, o
+        instrumento inteiro desce ou sobe.
+        """
+        if a4 <= 0:
+            raise ValueError(f"Afinação de referência inválida: {a4}")
+        self._a4 = float(a4)
+
+    @property
+    def a4(self) -> float:
+        return self._a4
+
     def set_mode(self, mode: str) -> None:
         if mode not in self.VALID_MODES:
             raise ValueError(f"Modo inválido: '{mode}'. Válidos: {self.VALID_MODES}")
@@ -147,15 +168,16 @@ class TunerEngine:
 
         if mode == "MANUAL" and self._locked_note:
             # Busca o alvo da nota travada em todos os tunings disponíveis
-            for tuning_notes in [get_notes_dict("GUITAR"), get_notes_dict("DROP D"), get_notes_dict("BASS")]:
+            for nome in ("GUITAR", "DROP D", "BASS"):
+                tuning_notes = get_notes_dict(nome, self._a4)
                 if self._locked_note in tuning_notes:
                     return self._locked_note, tuning_notes[self._locked_note]
             # Fallback: nota não encontrada
             return self._locked_note, freq
 
         if mode in {"GUITAR", "DROP D", "BASS"}:
-            notes = get_notes_dict(mode)
+            notes = get_notes_dict(mode, self._a4)
             return find_closest_note(freq, notes)
 
         # CHROMATIC
-        return find_chromatic_note(freq)
+        return find_chromatic_note(freq, self._a4)

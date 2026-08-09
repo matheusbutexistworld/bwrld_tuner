@@ -37,7 +37,7 @@ def test_guitar_e2_returns_active_result():
 def test_string_name_comes_filled():
     pipe = TunerPipeline(mode="GUITAR")
     result = feed(pipe, 82.41)
-    assert result.string_name == "6ª CORDA"
+    assert result.string_name == "STRING_6"  # chave de i18n, não texto
 
 
 def test_bass_e1_survives_pipeline():
@@ -53,7 +53,7 @@ def test_drop_d_keeps_large_deviation():
     result = feed(pipe, 82.41)
     assert result.active is True
     assert result.note == "D2"
-    assert result.status == "DROP A LOT"
+    assert result.status == "DROP_A_LOT"
 
 
 # ── suavização ────────────────────────────────────────────────────────────────
