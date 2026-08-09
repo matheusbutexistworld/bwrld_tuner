@@ -9,6 +9,9 @@ Concentra:
     - encontrar nota/alvo mais próximo
     - calcular raw_cents e display_cents
     - gerar texto de status
+
+Não filtra leitura ruim: isso depende da *sequência* de quadros, não de um
+quadro isolado, e vive em core/tracking.py.
 """
 from dataclasses import dataclass, field
 
@@ -156,12 +159,3 @@ class TunerEngine:
 
         # CHROMATIC
         return find_chromatic_note(freq)
-
-    # ── filtro de outliers (apenas CHROMATIC) ──
-    def should_reject(self, raw_cents: float) -> bool:
-        """Retorna True se a leitura deve ser descartada como outlier.
-
-        Apenas no modo CHROMATIC: desvios > 85 cents indicam detecção errada.
-        Em outros modos, a corda pode estar muito longe do alvo (ex: DROP D).
-        """
-        return self._mode == "CHROMATIC" and abs(raw_cents) > 85

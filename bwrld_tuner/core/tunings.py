@@ -57,6 +57,18 @@ def get_notes_dict(mode: str) -> dict[str, float]:
     return {note: freq for note, _label, freq in get_tuning(mode)}
 
 
+def get_display_tuning(mode: str) -> list[tuple[str, str, float]]:
+    """Retorna as cordas a exibir no painel de presets para qualquer modo.
+
+    Diferente de get_tuning(), aceita modos sem tabela própria: CHROMATIC (e
+    qualquer modo desconhecido) cai no preset de GUITAR, que é o que a UI já
+    mostrava na V6.
+    """
+    if mode in TUNINGS:
+        return TUNINGS[mode]
+    return TUNINGS["GUITAR"]
+
+
 def get_min_freq(mode: str) -> float:
     """Retorna a frequência mínima esperada para um modo.
 

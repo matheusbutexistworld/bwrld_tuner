@@ -64,6 +64,27 @@ def test_find_closest_note_empty_raises():
     with pytest.raises(ValueError):
         find_closest_note(82.41, {})
 
+def test_find_closest_note_invalid_freq_raises():
+    with pytest.raises(ValueError):
+        find_closest_note(0.0, {"E2": 82.41})
+
+def test_find_closest_note_uses_cents_not_hz():
+    """Distância musical é logarítmica: 95.5 Hz está mais perto de A2, não de E2.
+
+    Em Hz: |95.5 - 82.41| = 13.09 contra |95.5 - 110.0| = 14.50 -> escolheria E2.
+    Em cents: +254.6 contra -244.7 -> A2 está mais perto do ouvido.
+    """
+    notes = {"E2": 82.41, "A2": 110.0}
+    note, _ = find_closest_note(95.5, notes)
+    assert note == "A2"
+
+def test_find_closest_note_geometric_midpoint_is_the_boundary():
+    """A fronteira entre duas cordas é a média geométrica, não a aritmética."""
+    notes = {"E2": 82.41, "A2": 110.0}
+    meio = (82.41 * 110.0) ** 0.5  # ~95.21 Hz
+    assert find_closest_note(meio * 0.99, notes)[0] == "E2"
+    assert find_closest_note(meio * 1.01, notes)[0] == "A2"
+
 
 # ── find_chromatic_note ────────────────────────────────────────────────────────
 

@@ -109,18 +109,25 @@ def test_manual_unlock_restores_guitar():
     assert engine.mode == "MANUAL"  # mode permanece MANUAL até set_mode ser chamado
 
 
-# ── outlier rejection ─────────────────────────────────────────────────────────
+# ── por que não existe filtro de outlier aqui ─────────────────────────────────
 
-def test_chromatic_rejects_large_cents():
+def test_chromatic_deviation_never_exceeds_half_semitone():
+    """Documenta por que o antigo should_reject(>85 cents) era inalcançável.
+
+    find_chromatic_note() arredonda para o semitom mais próximo, então o desvio
+    máximo possível é meio semitom = 50 cents. Nenhum limiar acima disso podia
+    disparar. Filtrar leitura ruim depende da *sequência* de quadros e mudou
+    para core/tracking.py.
+    """
     engine = TunerEngine(mode="CHROMATIC")
-    result = engine.process_frequency(82.41)
-    assert not engine.should_reject(result.raw_cents)  # E2 em CHROMATIC é válido
+    pior = max(
+        abs(engine.process_frequency(30.0 + i * 0.05).raw_cents)
+        for i in range(9400)  # varre 30 Hz .. 500 Hz
+    )
+    assert pior <= 50.0
 
-def test_drop_d_never_rejects():
-    engine = TunerEngine(mode="DROP D")
-    # mesmo com desvio gigante, DROP D não deve rejeitar
-    result = engine.process_frequency(82.41)
-    assert engine.should_reject(result.raw_cents) is False
+def test_engine_has_no_outlier_filter():
+    assert not hasattr(TunerEngine(), "should_reject")
 
 
 # ── zero/inválido ──────────────────────────────────────────────────────────────

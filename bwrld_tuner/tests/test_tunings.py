@@ -2,7 +2,13 @@
 tests/test_tunings.py — Testes para core/tunings.py
 """
 import pytest
-from core.tunings import TUNINGS, get_tuning, get_notes_dict, get_min_freq
+from core.tunings import (
+    TUNINGS,
+    get_display_tuning,
+    get_min_freq,
+    get_notes_dict,
+    get_tuning,
+)
 
 
 # ── estrutura dos presets ──────────────────────────────────────────────────────
@@ -65,6 +71,21 @@ def test_get_notes_dict_drop_d_contains_d2_not_e2():
 def test_get_tuning_unknown_mode_raises():
     with pytest.raises(KeyError):
         get_tuning("UKULELE")
+
+
+# ── get_display_tuning ────────────────────────────────────────────────────────
+
+def test_display_tuning_chromatic_falls_back_to_guitar():
+    assert get_display_tuning("CHROMATIC") == get_tuning("GUITAR")
+
+def test_display_tuning_unknown_mode_does_not_raise():
+    assert get_display_tuning("UKULELE") == get_tuning("GUITAR")
+
+def test_display_tuning_bass_has_4_strings():
+    assert len(get_display_tuning("BASS")) == 4
+
+def test_display_tuning_drop_d_is_drop_d():
+    assert get_display_tuning("DROP D") == get_tuning("DROP D")
 
 
 # ── get_min_freq ──────────────────────────────────────────────────────────────

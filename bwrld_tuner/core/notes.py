@@ -47,12 +47,19 @@ def clip_cents(cents: float, min_value: float = -50.0, max_value: float = 50.0) 
 def find_closest_note(freq: float, notes_dict: dict) -> tuple[str, float]:
     """Encontra a nota mais próxima em um dicionário {nome: freq_hz}.
 
+    A proximidade é medida em cents, não em Hz. Distância musical é logarítmica:
+    entre E2 (82.41) e A2 (110.00) o ponto médio auditivo é 95.2 Hz, mas o ponto
+    médio em Hz é 96.2 Hz. Medir em Hz enviesa a escolha para a corda mais grave,
+    justamente na faixa onde o músico chega desafinado.
+
     Returns:
         (note_name, target_freq)
     """
     if not notes_dict:
         raise ValueError("Dicionário de notas está vazio.")
-    nota = min(notes_dict, key=lambda n: abs(freq - notes_dict[n]))
+    if freq <= 0:
+        raise ValueError(f"Frequência inválida: {freq}")
+    nota = min(notes_dict, key=lambda n: abs(cents_between(freq, notes_dict[n])))
     return nota, notes_dict[nota]
 
 
