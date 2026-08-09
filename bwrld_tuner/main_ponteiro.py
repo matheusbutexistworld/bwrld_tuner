@@ -74,6 +74,13 @@ FONT_NUM = _primeira_fonte("consola.ttf", padrao="RobotoMono-Regular")
 IN_TUNE_CENTS = 5.0   # Faixa considerada afinada (detente verde da fita)
 METER_RANGE   = 50.0  # Cents nas extremidades da fita
 
+# ── Métrica de layout ─────────────────────
+MARGEM     = 24
+PANEL_W    = 210   # largura dos painéis laterais
+PANEL_GAP  = 16    # respiro entre painel e miolo
+HEADER_H   = 88    # duas linhas: título em cima, controles embaixo
+FOOTER_H   = 42
+
 # Altura do bloco central (nota + fita + números) com escala 1.0. A escala da
 # janela sai daqui, não de um número solto: se os blocos mudarem de tamanho,
 # a conta de caber continua certa. Ver layout() e draw_center_content().
@@ -151,6 +158,11 @@ class BwrldTunerUI(Widget):
         self.lang = DEFAULT_LANG
         self.a4 = A4_STANDARD
 
+        # Painéis laterais ocultos por padrão: o miolo é o que importa e assim
+        # a fita ocupa a largura toda. O botão PAINÉIS traz de volta quando
+        # você precisar travar numa corda ou conferir o nível do sinal.
+        self.show_panels = False
+
         # Flag: request history flush on mode/preset change (read by App.apply_audio_data)
         self.needs_history_reset = False
 
@@ -200,18 +212,31 @@ class BwrldTunerUI(Widget):
     # on_touch_down leem daqui, então mudar o layout não desalinha os cliques.
 
     def layout(self, w, h):
-        """Retângulos dos três painéis e a escala tipográfica da janela."""
-        px_left = 24
-        px_right = w - 234
-        py_start = 42
-        p_height = h - 110
+        """Retângulos dos painéis e a escala tipográfica da janela.
+
+        Com os painéis laterais ocultos, o miolo ocupa a largura toda e a fita
+        fica bem maior — que é o ponto de poder escondê-los.
+        """
+        px_left = MARGEM
+        px_right = w - MARGEM - PANEL_W
+        py_start = FOOTER_H
+        p_height = h - HEADER_H - FOOTER_H
+
+        if self.show_panels:
+            cx0 = px_left + PANEL_W + PANEL_GAP
+            cx1 = px_right - PANEL_GAP
+        else:
+            cx0 = MARGEM
+            cx1 = w - MARGEM
+
         return {
             "px_left": px_left,
             "px_right": px_right,
             "py_start": py_start,
             "p_height": p_height,
-            "cx_center": px_left + 226 + (px_right - px_left - 242) / 2,
-            "w_center": px_right - px_left - 242,
+            "cx_center": (cx0 + cx1) / 2,
+            "w_center": cx1 - cx0,
+            "centro_x0": cx0,
             # Escala do conteúdo central: derivada da altura que o bloco
             # realmente ocupa, com 8% de folga. Em janela pequena tudo encolhe
             # junto em vez de vazar para o header e o rodapé; em janela grande
@@ -219,16 +244,27 @@ class BwrldTunerUI(Widget):
             "s": max(0.45, min(1.0, (p_height * 0.92) / CENTER_CONTENT_H)),
         }
 
+    # ── Linha de controles do header ──────
+    # Tudo numa faixa de 30 px de altura, logo abaixo do título. Separar título
+    # e controles em duas linhas é o que permite os botões serem grandes: numa
+    # linha só, a 820 px de largura, eles tinham que encolher para caber.
+
+    def controls_row_y(self, h):
+        """(y, altura) da faixa de controles do cabeçalho."""
+        return h - 68, 30
+
     def mode_button_rects(self, w, h):
-        """[(nome_do_modo, x, y, largura, altura)] da barra de modos no header."""
-        btn_w, btn_h, gap = 92, 22, 10
+        """[(nome_do_modo, x, y, largura, altura)] da barra de modos."""
+        y, bh = self.controls_row_y(h)
+        bw, gap = (108, 8) if w >= 1100 else (96, 6)
         modes = ["CHROMATIC", "GUITAR", "DROP D", "BASS"]
-        total = len(modes) * btn_w + (len(modes) - 1) * gap
-        x0 = w - 24 - total
-        return [
-            (m, x0 + i * (btn_w + gap), h - 45, btn_w, btn_h)
-            for i, m in enumerate(modes)
-        ]
+        total = len(modes) * bw + (len(modes) - 1) * gap
+        x0 = w - MARGEM - total
+        return [(m, x0 + i * (bw + gap), y, bw, bh) for i, m in enumerate(modes)]
+
+    def panels_button_rect(self, w, h):
+        """(x, y, largura, altura) do botão que mostra/oculta os painéis."""
+        return (w - MARGEM - 104, h - 40, 104, 24)
 
     def preset_row_rects(self, px_right, py_start, p_height):
         """[(nota, rótulo, hz, x, y, largura, altura)] das linhas de preset.
@@ -259,21 +295,22 @@ class BwrldTunerUI(Widget):
         return (px_right + 15, py_start + 15, 180, 30)
 
     def lang_button_rect(self, w, h):
-        """(x, y, largura, altura) do botão de idioma, à direita do título."""
-        return (250, h - 45, 52, 22)
+        """(x, y, largura, altura) do botão de idioma — início da linha."""
+        y, bh = self.controls_row_y(h)
+        return (MARGEM, y, 54, bh)
 
-    def reference_button_rects(self, px_left, py_start, p_height):
+    def reference_button_rects(self, w, h):
         """[(a4, x, y, largura, altura)] dos botões 440 / 432 / 415.
 
-        Ficam no topo do painel esquerdo, abaixo do título. O painel tem 210 px
-        de largura útil, então três pílulas de 56 px com 6 px de folga cabem
-        sem apertar mesmo na janela mínima.
+        Saíram do painel esquerdo para o cabeçalho: o painel pode estar oculto,
+        e a referência precisa continuar acessível.
         """
-        top_y = py_start + p_height
-        btn_w, btn_h, gap = 56, 22, 6
-        y = top_y - 78
+        y, bh = self.controls_row_y(h)
+        bw, gap = (66, 6) if w >= 1100 else (58, 5)
+        lx, _ly, lw, _lh = self.lang_button_rect(w, h)
+        x0 = lx + lw + 44          # espaço para o rótulo "A4"
         return [
-            (a4, px_left + 20 + i * (btn_w + gap), y, btn_w, btn_h)
+            (a4, x0 + i * (bw + gap), y, bw, bh)
             for i, a4 in enumerate(REFERENCE_PITCHES)
         ]
 
@@ -346,32 +383,38 @@ class BwrldTunerUI(Widget):
         self._text(texto, x + w / 2, y + (h - tam) / 2 - 1, tam, cor, bold=True, align="center", cache=True)
 
     def draw_header(self, w, h):
-        self._text("BWRLD", 24, h - 38, 13, CREAM, bold=True, align="left", cache=True)
-        self._text(t("APP_SUBTITLE", self.lang), 88, h - 37, 10, LABEL, bold=True, align="left", cache=True)
+        # ── Linha 1: identidade e o botão de painéis ──
+        self._text("BWRLD", MARGEM, h - 32, 15, CREAM, bold=True, align="left", cache=True)
+        self._text(t("APP_SUBTITLE", self.lang), MARGEM + 76, h - 30, 11, LABEL, bold=True, align="left", cache=True)
 
-        # Botão de idioma
-        lx, ly, lw, lh = self.lang_button_rect(w, h)
-        self._pill(lx, ly, lw, lh, False, LANGUAGE_LABEL.get(self.lang, "?"), tam=10)
-
-        # Cápsula LOCKED quando há corda travada manualmente
         if self.tuner_mode == "MANUAL" and self.selected_preset:
-            bx = lx + lw + 12
-            self._rounded_rect(bx, h - 45, 105, 22, with_alpha(AMBER, 0.10), 11)
+            bx = MARGEM + 76 + 190
+            self._rounded_rect(bx, h - 36, 118, 24, with_alpha(AMBER, 0.10), 12)
             with self.canvas:
                 Color(*with_alpha(AMBER, 0.40))
-                Line(rounded_rectangle=[bx, h - 45, 105, 22, 11], width=1)
-            self._text(f"{t('LOCKED', self.lang)}: {self.selected_preset}", bx + 52, h - 39, 9,
+                Line(rounded_rectangle=[bx, h - 36, 118, 24, 12], width=1)
+            self._text(f"{t('LOCKED', self.lang)}: {self.selected_preset}", bx + 59, h - 30, 10,
                        AMBER, bold=True, align="center", cache=False)
 
-        # Barra de modos (geometria vinda de mode_button_rects)
-        botoes = self.mode_button_rects(w, h)
-        self._text(t("MODE", self.lang), botoes[0][1] - 52, h - 38, 11, LABEL, bold=True, align="left", cache=True)
+        px, py, pw, ph = self.panels_button_rect(w, h)
+        self._pill(px, py, pw, ph, self.show_panels, t("PANELS", self.lang), tam=10)
 
+        # ── Linha 2: idioma, referência e modos ──
+        lx, ly, lw, lh = self.lang_button_rect(w, h)
+        self._pill(lx, ly, lw, lh, False, LANGUAGE_LABEL.get(self.lang, "?"), tam=13)
+
+        refs = self.reference_button_rects(w, h)
+        self._text("A4", lx + lw + 14, ly + 8, 12, LABEL, bold=True, align="left", cache=True)
+        for a4, bx, by, bw, bh in refs:
+            self._pill(bx, by, bw, bh, a4 == self.a4, f"{a4:.0f}", tam=13)
+
+        botoes = self.mode_button_rects(w, h)
+        self._text(t("MODE", self.lang), botoes[0][1] - 12, ly + 8, 12, LABEL, bold=True, align="right", cache=True)
         for mode_name, bx, by, bw, bh in botoes:
             is_sel = (self.tuner_mode == mode_name or (self.tuner_mode == "MANUAL" and self.base_mode == mode_name))
-            self._pill(bx, by, bw, bh, is_sel, t(mode_name, self.lang))
+            self._pill(bx, by, bw, bh, is_sel, t(mode_name, self.lang), tam=12)
 
-        self._line([24, h - 50, w - 24, h - 50], BORDER, 1.2)
+        self._line([MARGEM, h - HEADER_H + 8, w - MARGEM, h - HEADER_H + 8], BORDER, 1.2)
 
     def draw_left_panel(self, px_left, py_start, p_height):
         top_y = py_start + p_height
@@ -388,17 +431,12 @@ class BwrldTunerUI(Widget):
         self._text(t("PANEL_TELEMETRY", self.lang), px_left + 16, top_y - 25, 11, LABEL, bold=True, align="left", cache=True)
         self._line([px_left + 16, top_y - 34, px_left + 194, top_y - 34], BORDER, 1)
 
-        # Seletor de afinação de referência (440 / 432 / 415)
-        self._text(f"{t('REFERENCE', self.lang)} A4", px_left + 20, top_y - 54, 10, LABEL, bold=True, align="left", cache=True)
-        for a4, bx, by, bw, bh in self.reference_button_rects(px_left, py_start, p_height):
-            self._pill(bx, by, bw, bh, a4 == self.a4, f"{a4:.0f}")
-
         # Barras preenchendo a altura do painel. O que estragava antes era a
         # proporção (762x16 = 47:1), não a altura: com 46 px de largura e
         # marcações de escala elas leem como VU meter de verdade.
         bar_w = 46
-        rot_y = top_y - 106                   # rótulos abaixo do seletor de A4
-        bar_top = top_y - 122
+        rot_y = top_y - 62                    # rótulos abaixo do título
+        bar_top = top_y - 78
         bar_y = py_start + 104                # espaço para números + badge
         bar_h = max(40.0, bar_top - bar_y)
 
@@ -450,15 +488,15 @@ class BwrldTunerUI(Widget):
             Line(rounded_rectangle=[bx, by, badge_w, badge_h, 10], width=1.0)
         self._text(sig_status, px_left + 105, by + 4, 10, sig_color, bold=True, align="center", cache=False)
 
-    def draw_center_panel(self, cx, cy, w_center, p_height, main_color):
-        px_left = 24
-        py_start = 42
-        panel_bg = with_alpha(PANEL, 0.45)
-        panel_border = BORDER
-        self._rounded_rect(px_left + 226, py_start, w_center, p_height, panel_bg, 12)
+    def draw_center_panel(self, geo, main_color):
+        """Moldura do miolo. As bordas vêm de layout(), então ela acompanha a
+        largura extra quando os painéis laterais estão ocultos."""
+        x = geo["centro_x0"]
+        y = geo["py_start"]
+        self._rounded_rect(x, y, geo["w_center"], geo["p_height"], with_alpha(PANEL, 0.45), 12)
         with self.canvas:
-            Color(*panel_border)
-            Line(rounded_rectangle=[px_left + 226, py_start, w_center, p_height, 12], width=1.2)
+            Color(*BORDER)
+            Line(rounded_rectangle=[x, y, geo["w_center"], geo["p_height"], 12], width=1.2)
 
     def _meter_x(self, cx, half, cents):
         """Posição horizontal de um valor em cents dentro da fita."""
@@ -602,7 +640,9 @@ class BwrldTunerUI(Widget):
         """
         cx = geo["cx_center"]
         s = geo["s"]
-        strip_w = max(240.0, min(geo["w_center"] * 0.80, 1120.0))
+        # Teto maior que antes: sem os painéis laterais sobra largura, e fita
+        # mais larga = mais resolução visual perto do zero.
+        strip_w = max(240.0, min(geo["w_center"] * 0.82, 1400.0))
 
         h_nota = CENTER_NOTE_H * s
         h_fita = CENTER_METER_H * s
@@ -682,8 +722,8 @@ class BwrldTunerUI(Widget):
         btn_x, btn_y, btn_w, btn_h = self.reset_button_rect(px_right, py_start)
 
         if self.selected_preset is not None:
-            btn_bg = (0.00, 1.00, 0.40, 0.08)
-            btn_brd = (0.00, 1.00, 0.40, 0.6)
+            btn_bg = with_alpha(GREEN, 0.10)
+            btn_brd = with_alpha(GREEN, 0.6)
             btn_txt = t("RESET_LOCK", self.lang)
             btn_color = GREEN
         else:
@@ -699,9 +739,27 @@ class BwrldTunerUI(Widget):
         self._text(btn_txt, btn_x + btn_w / 2, btn_y + 8, 10, btn_color, bold=True, align="center", cache=True)
 
     def draw_footer(self, w, h):
-        self._line([24, 34, w - 24, 34], BORDER, 1.0)
-        self._text(t("FOOTER_LEFT", self.lang), 24, 15, 9, STEEL, bold=True, align="left", cache=True)
-        self._text(f"A4 {self.a4:.0f} HZ   /   {FS/1000:.1f} KHZ   /   {BLOCKSIZE}", w - 24, 15, 9, STEEL, bold=True, align="right", cache=True)
+        self._line([MARGEM, 34, w - MARGEM, 34], BORDER, 1.0)
+        self._text(t("FOOTER_LEFT", self.lang), MARGEM, 15, 9, STEEL, bold=True, align="left", cache=True)
+
+        # Estado do sinal fica sempre visível, mesmo com o painel oculto: é a
+        # informação do painel esquerdo que você realmente precisa de relance
+        # ("o afinador não reage" quase sempre é sinal fraco).
+        if self.rms < RMS_TRIGGER:
+            sig_txt, sig_cor = t("SIGNAL_LOW", self.lang), AMBER
+        elif self.clarity < CLARITY_TRIGGER:
+            sig_txt, sig_cor = t("SIGNAL_NOISY", self.lang), BRICK
+        else:
+            sig_txt, sig_cor = t("SIGNAL_OK", self.lang), GREEN
+
+        cx = w / 2
+        with self.canvas:
+            Color(*sig_cor)
+            Ellipse(pos=(cx - 74, 17), size=(7, 7))
+        self._text(sig_txt, cx - 60, 15, 9, sig_cor, bold=True, align="left", cache=True)
+        self._text(f"{self.rms:.4f} / {self.clarity:.2f}", cx + 74, 15, 9, STEEL, align="left", cache=False, font=FONT_NUM)
+
+        self._text(f"A4 {self.a4:.0f} HZ   /   {FS/1000:.1f} KHZ   /   {BLOCKSIZE}", w - MARGEM, 15, 9, STEEL, bold=True, align="right", cache=True)
 
     def draw(self, dt):
         self.canvas.clear()
@@ -723,10 +781,11 @@ class BwrldTunerUI(Widget):
         # Modular execution blocks
         self.draw_background(w, h)
         self.draw_header(w, h)
-        self.draw_left_panel(px_left, py_start, p_height)
-        self.draw_center_panel(cx, cy, w_center, p_height, main_color)
+        if self.show_panels:
+            self.draw_left_panel(px_left, py_start, p_height)
+            self.draw_right_panel(px_right, py_start, p_height, main_color)
+        self.draw_center_panel(geo, main_color)
         self.draw_center_content(geo, main_color)
-        self.draw_right_panel(px_right, py_start, p_height, main_color)
         self.draw_footer(w, h)
 
     def on_touch_down(self, touch):
@@ -747,8 +806,15 @@ class BwrldTunerUI(Widget):
             print(f"[TUNER] Idioma: {self.lang}")
             return True
 
+        # 1b. Mostrar/ocultar painéis laterais
+        px, py, pw, ph = self.panels_button_rect(w, h)
+        if px <= touch.x <= px + pw and py <= touch.y <= py + ph:
+            self.show_panels = not self.show_panels
+            print(f"[TUNER] Painéis: {'visíveis' if self.show_panels else 'ocultos'}")
+            return True
+
         # 2. Seletor de afinação de referência
-        for a4, bx, by, bw, bh in self.reference_button_rects(geo["px_left"], py_start, p_height):
+        for a4, bx, by, bw, bh in self.reference_button_rects(w, h):
             if bx <= touch.x <= bx + bw and by <= touch.y <= by + bh:
                 if a4 != self.a4:
                     self.a4 = a4
@@ -766,8 +832,8 @@ class BwrldTunerUI(Widget):
                 print(f"[TUNER] Active mode set to {mode_name}")
                 return True
 
-        # 4. Painel direito
-        if px_right <= touch.x <= px_right + 210 and py_start <= touch.y <= py_start + p_height:
+        # 4. Painel direito — só recebe clique quando está visível
+        if self.show_panels and px_right <= touch.x <= px_right + PANEL_W and py_start <= touch.y <= py_start + p_height:
             # Botão AUTO MODE / RESET LOCK
             rx, ry, rw, rh = self.reset_button_rect(px_right, py_start)
             if rx <= touch.x <= rx + rw and ry <= touch.y <= ry + rh:

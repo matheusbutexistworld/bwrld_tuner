@@ -71,6 +71,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "NO_SOURCE":      "SEM FONTE",
 
         # Botões
+        "PANELS":     "PAINÉIS",
         "AUTO_MODE":  "MODO AUTO",
         "RESET_LOCK": "SOLTAR CORDA",
         "LOCKED":     "TRAVADO",
@@ -122,6 +123,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "CENTS":          "CENTS",
         "NO_SOURCE":      "NO SOURCE",
 
+        "PANELS":     "PANELS",
         "AUTO_MODE":  "AUTO MODE",
         "RESET_LOCK": "RELEASE STRING",
         "LOCKED":     "LOCKED",
