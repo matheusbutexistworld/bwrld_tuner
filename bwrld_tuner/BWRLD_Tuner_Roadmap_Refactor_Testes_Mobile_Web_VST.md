@@ -600,6 +600,10 @@ Porque junta:
 
 # Ordem recomendada de execução
 
+> **Status:** Sprints 1 a 4 concluídos. `main_ponteiro.py` já roda sobre `core/`,
+> com 86 testes cobrindo notas, tunings, engine, smoothing, gate e pipeline.
+> Próximo alvo: Sprint 5 (layout mobile).
+
 ## Sprint 1 — Testes base
 
 - criar `core/notes.py`;
@@ -670,10 +674,72 @@ git commit -m "descrição clara da mudança"
 
 # Próxima ação imediata
 
-A próxima coisa que devemos fazer é:
+Sprint 4 concluído. O que mudou:
 
 ```text
-Criar core/notes.py, core/tunings.py e os primeiros testes com pytest.
+main_ponteiro.py: 852 -> 698 linhas, sem lógica musical duplicada
+core/pipeline.py: nova camada gate -> smoothing -> engine (17 testes)
+core/tunings.py: get_display_tuning() para o painel de presets
+pytest.ini: pythonpath = . (agora "pytest" puro funciona, não só "python -m pytest")
 ```
 
-Essa é a base para refatorar sem medo.
+Corrigido no caminho:
+
+```text
+Race condition: histórico de frequências era escrito pela thread de áudio
+                e limpo pela thread do Kivy fora do lock. Agora todo o
+                processamento acontece na thread do Kivy.
+min_freq:       MANUAL sobre BASS usava 55 Hz e nunca detectava E1 (41.20 Hz).
+                Agora usa effective_mode.
+Código morto:   cents_history, status_txt="AFINADO", GUITAR_STRINGS,
+                import não usado de encontrar_nota.
+```
+
+# Sprint 4.5 — Continuidade de pitch (concluído)
+
+O filtro de outliers da V6 (`abs(cents) > 85` em CHROMATIC) era inalcançável e
+foi removido. Substituído por `core/tracking.py`, que compara quadros
+**consecutivos** em vez de comparar contra a nota alvo:
+
+```text
+ACCEPTED     variação < 150 cents        -> usa a leitura
+OCTAVE_FIXED salto de ~1200 cents        -> dobra de volta para a oitava certa
+REJECTED     salto isolado sem forma     -> descarta o quadro (vira HOLD)
+RETUNED      salto repetido              -> o músico mudou de nota mesmo
+```
+
+Erro de oitava exige mais confirmação (5 quadros ≈ 460 ms) que salto comum
+(2 quadros ≈ 190 ms): travar no 2º harmônico é o erro mais frequente do
+detector, e tocar exatamente uma oitava acima é a mudança menos frequente do
+músico.
+
+Também corrigido: `find_closest_note()` media distância em **Hz linear**.
+Distância musical é logarítmica — a fronteira entre duas cordas é a média
+geométrica, não a aritmética. Medir em Hz enviesava para a corda mais grave.
+
+Estado: 113 testes, 98% de cobertura em `core/`.
+
+---
+
+# Nota sobre o caminho VST
+
+Decisão tomada: **desktop standalone offline primeiro**, VST depois, mobile por
+último. Isso muda uma regra de `core/`:
+
+```text
+core/ deve evitar numpy em código novo.
+```
+
+Não por performance, mas porque `core/` é o que será portado para C++/JUCE.
+`core/tracking.py` já segue isso (só `math`). Os módulos antigos ainda usam
+numpy para operações escalares triviais (`np.log2`, `np.clip`, `np.median`) —
+trocar por `math` e uma mediana manual é um refactor pequeno que deixa a
+tradução para C++ quase mecânica.
+
+Ainda fora de `core/`: a detecção de pitch em si continua em `tuner_pro.py`,
+sem teste nenhum (`core/pitch_detection.py` é só o Protocol). É o maior buraco
+de cobertura restante e o próximo alvo natural antes do VST.
+
+---
+
+A próxima coisa é a **lapidação da interface gráfica**, depois o Sprint 5.
