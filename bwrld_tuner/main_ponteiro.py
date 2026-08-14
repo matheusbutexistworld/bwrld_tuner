@@ -5,18 +5,23 @@ from kivy.core.window import Window
 from kivy.core.text import Label as CoreLabel
 from kivy.clock import Clock
 
-import sounddevice as sd
-import numpy as np
-from collections import deque
+import os
 from threading import Lock
-import time
-import math
 
-from tuner_pro import detectar_frequencia, encontrar_nota
+import sounddevice as sd
+
+from tuner_pro import detectar_frequencia
+
+from core.i18n import DEFAULT_LANG, LANGUAGE_LABEL, next_language, t
+from core.pipeline import TunerPipeline
+from core.tunings import A4_STANDARD, REFERENCE_PITCHES, get_display_tuning, get_min_freq
+from core.version import ENGINE_LABEL, WINDOW_TITLE
 
 # ==========================================
-# BWRLD TUNER V6.2 - EXPERT SYSTEM EDITION
+# BWRLD TUNER V7 - ANALOG EDITION
 # ==========================================
+# Toda a lógica musical (notas, cents, status, suavização, gate) vive em core/
+# e é coberta por testes. Este arquivo é apenas áudio + desenho.
 FS = 44100
 BLOCKSIZE = 4096
 CHANNELS = 1
@@ -26,76 +31,76 @@ MAX_FREQ = 500
 RMS_TRIGGER = 0.006
 CLARITY_TRIGGER = 0.18
 HISTORY_SIZE = 7
+HOLD_TIME = 0.75  # Segundos segurando a última leitura antes de ir para STANDBY
 
 # Set window size and dark theme background color
-Window.clearcolor = (0.035, 0.039, 0.047, 1.0)  # Deep Charcoal #090a0f
+Window.clearcolor = (0.078, 0.071, 0.055, 1.0)  # #14120E carvão quente
 Window.minimum_width = 820
 Window.minimum_height = 560
 
-CORDA_MAP = {
-    "E1": "4ª CORDA",
-    "A1": "3ª CORDA",
-    "D2": "2ª CORDA",
-    "G2": "1ª CORDA",
-    "E2": "6ª CORDA",
-    "A2": "5ª CORDA",
-    "D3": "4ª CORDA",
-    "G3": "3ª CORDA",
-    "B3": "2ª CORDA",
-    "E4": "1ª CORDA",
-}
+# ── Paleta analógica ──────────────────────
+# Carvão quente + creme, com os indicadores em tons de gear vintage. Nada de
+# neon saturado: o verde/âmbar/tijolo abaixo são os mesmos da serigrafia de
+# pedal e de mostrador de VU meter. O código de cor (verde = afinado) sobrevive.
+GREEN      = (0.498, 0.651, 0.314, 1.0)  # #7FA650 verde-musgo — afinado
+AMBER      = (0.784, 0.525, 0.165, 1.0)  # #C8862A âmbar queimado — fora
+BRICK      = (0.651, 0.239, 0.180, 1.0)  # #A63D2E tijolo — muito fora
+CREAM      = (0.910, 0.875, 0.784, 1.0)  # #E8DFC8 texto principal
+STEEL      = (0.380, 0.353, 0.302, 1.0)  # #615A4D inativo
+INK        = (0.055, 0.047, 0.035, 1.0)  # #0E0C09 fundo de trilho
+PANEL      = (0.110, 0.098, 0.075, 1.0)  # #1C1913 fundo de painel
+BORDER     = (0.227, 0.204, 0.165, 1.0)  # #3A342A bordas
+LABEL      = (0.549, 0.510, 0.443, 1.0)  # #8C8271 texto secundário
 
-# Dynamic string arrays for instrument/tuning presets
-GUITAR_STRINGS = [
-    ("E4", "1ª CORDA", 329.63),
-    ("B3", "2ª CORDA", 246.94),
-    ("G3", "3ª CORDA", 196.00),
-    ("D3", "4ª CORDA", 146.83),
-    ("A2", "5ª CORDA", 110.00),
-    ("E2", "6ª CORDA", 82.41),
-]
+# ── Tipografia ────────────────────────────
+# Bahnschrift é a DIN condensada do Windows: cara de painel de instrumento.
+# Consolas dá o ar de mostrador digital nos números. Ambas caem para as fontes
+# que vêm dentro do Kivy quando não existem — o app não pode quebrar em outra
+# máquina só por causa de fonte.
+_WIN_FONTS = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "Fonts")
 
-# Custom Frequency Matchers to avoid editing tuner_pro.py
-A4 = 440.0
-NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
-def encontrar_nota_cromatica(freq):
-    """Finds the closest note in the standard 12-tone equal temperament scale."""
-    if freq <= 0:
-        return "---", 0.0
-    midi_num = round(12 * np.log2(freq / 440.0) + 69)
-    target_freq = 440.0 * (2.0 ** ((midi_num - 69) / 12.0))
-    octave = (midi_num // 12) - 1
-    note_name = NOTE_NAMES[midi_num % 12] + str(octave)
-    return note_name, target_freq
+def _primeira_fonte(*candidatas, padrao="Roboto"):
+    """Devolve o caminho da primeira fonte que existir, ou o nome de fallback."""
+    for nome in candidatas:
+        caminho = os.path.join(_WIN_FONTS, nome)
+        if os.path.exists(caminho):
+            return caminho
+    return padrao
 
-def encontrar_nota_guitar(freq):
-    guitar_notes = {
-        "E2": 82.41, "A2": 110.00, "D3": 146.83,
-        "G3": 196.00, "B3": 246.94, "E4": 329.63
-    }
-    nota = min(guitar_notes, key=lambda n: abs(freq - guitar_notes[n]))
-    return nota, guitar_notes[nota]
 
-def encontrar_nota_drop_d(freq):
-    drop_notes = {
-        "D2": 73.42, "A2": 110.00, "D3": 146.83,
-        "G3": 196.00, "B3": 246.94, "E4": 329.63
-    }
-    nota = min(drop_notes, key=lambda n: abs(freq - drop_notes[n]))
-    return nota, drop_notes[nota]
+FONT_UI = _primeira_fonte("bahnschrift.ttf", "segoeui.ttf", padrao="Roboto")
+FONT_NUM = _primeira_fonte("consola.ttf", padrao="RobotoMono-Regular")
 
-def encontrar_nota_bass(freq):
-    bass_notes = {
-        "E1": 41.20, "A1": 55.00, "D2": 73.42, "G2": 98.00
-    }
-    nota = min(bass_notes, key=lambda n: abs(freq - bass_notes[n]))
-    return nota, bass_notes[nota]
+IN_TUNE_CENTS = 5.0   # Faixa considerada afinada (detente verde da fita)
+METER_RANGE   = 50.0  # Cents nas extremidades da fita
 
-def cents_between(freq, target):
-    if freq <= 0 or target <= 0:
-        return 0.0
-    return 1200.0 * np.log2(freq / target)
+# ── Métrica de layout ─────────────────────
+MARGEM     = 24
+PANEL_W    = 210   # largura dos painéis laterais
+PANEL_GAP  = 16    # respiro entre painel e miolo
+HEADER_H   = 88    # duas linhas: título em cima, controles embaixo
+FOOTER_H   = 42
+
+# Altura do bloco central (nota + fita + números) com escala 1.0. A escala da
+# janela sai daqui, não de um número solto: se os blocos mudarem de tamanho,
+# a conta de caber continua certa. Ver layout() e draw_center_content().
+CENTER_NOTE_H = 150.0 + 44.0
+CENTER_METER_H = 190.0
+CENTER_NUM_H = 190.0
+CENTER_GAP = 66.0
+CENTER_CONTENT_H = CENTER_NOTE_H + CENTER_GAP + CENTER_METER_H + CENTER_GAP + CENTER_NUM_H
+
+
+def _fs(base, s, minimo=9):
+    """Tamanho de fonte escalado, com piso legível de verdade.
+
+    O idioma `int(base * s) or minimo` não servia: `or` só dispara quando o
+    valor é zero, então em janela pequena int(11 * 0.586) = 6 passava batido e
+    os rótulos da escala saíam em 6 px.
+    """
+    return max(int(minimo), int(round(base * s)))
+
 
 def lerp(a, b, t):
     return a + (b - a) * t
@@ -104,42 +109,31 @@ def mix_color(c1, c2, t):
     t = max(0.0, min(1.0, t))
     return tuple(lerp(c1[i], c2[i], t) for i in range(4))
 
+def with_alpha(color, alpha):
+    """Mesma cor com outra opacidade."""
+    return (color[0], color[1], color[2], alpha)
+
 def color_for_cents(cents, active=True):
     if not active:
-        return (0.35, 0.38, 0.46, 1.0)  # Dim steel blue for inactive
+        return STEEL
 
     a = abs(cents)
-    # Futuristic Neon Color Palette
-    green = (0.00, 1.00, 0.40, 1.0)  # Neon Green #00FF66 (tuned)
-    amber = (1.00, 0.65, 0.00, 1.0)  # Neon Amber #FFA600 (slightly flat/sharp)
-    red = (1.00, 0.20, 0.25, 1.0)    # Neon Red #FF333F (far out of tune)
-
     if a <= 4:
-        return green
+        return GREEN
     if a <= 15:
-        return mix_color(green, amber, (a - 4) / 11)
+        return mix_color(GREEN, AMBER, (a - 4) / 11)
     if a <= 30:
-        return mix_color(amber, red, (a - 15) / 15)
-    return red
+        return mix_color(AMBER, BRICK, (a - 15) / 15)
+    return BRICK
 
-def angle_for_cents(cents):
-    """Maps -50..+50 cents to a flat dashboard arc: 140°..40°."""
-    cents = float(np.clip(cents, -50, 50))
-    return 90.0 - (cents / 50.0) * 50.0
-
-def polar(cx, cy, radius, angle_deg):
-    rad = math.radians(angle_deg)
-    return cx + math.cos(rad) * radius, cy + math.sin(rad) * radius
-
-def arc_points(cx, cy, radius, start_deg, end_deg, steps=48):
-    """Generates continuous coordinate points to render Kivy Line arcs."""
-    pts = []
-    for i in range(steps + 1):
-        t = i / steps
-        ang = start_deg + (end_deg - start_deg) * t
-        x, y = polar(cx, cy, radius, ang)
-        pts.extend([x, y])
-    return pts
+def zone_color(cents):
+    """Cor fixa da zona da escala (não interpolada) para marcações e rótulos."""
+    a = abs(cents)
+    if a <= IN_TUNE_CENTS:
+        return GREEN
+    if a <= 25:
+        return AMBER
+    return BRICK
 
 class BwrldTunerUI(Widget):
     def __init__(self, **kwargs):
@@ -161,6 +155,15 @@ class BwrldTunerUI(Widget):
         self.base_mode = "CHROMATIC"   # Fallback from manual lock: CHROMATIC, GUITAR, DROP D, BASS
         self.selected_preset = None
 
+        # Idioma da interface e afinação de referência (A4)
+        self.lang = DEFAULT_LANG
+        self.a4 = A4_STANDARD
+
+        # Painéis laterais ocultos por padrão: o miolo é o que importa e assim
+        # a fita ocupa a largura toda. O botão PAINÉIS traz de volta quando
+        # você precisar travar numa corda ou conferir o nível do sinal.
+        self.show_panels = False
+
         # Flag: request history flush on mode/preset change (read by App.apply_audio_data)
         self.needs_history_reset = False
 
@@ -169,17 +172,23 @@ class BwrldTunerUI(Widget):
 
         Clock.schedule_interval(self.draw, 1 / 60)
 
-    def set_data(self, note, freq, target, cents, status, rms, clarity, active=True):
-        self.note = note
-        self.string_name = CORDA_MAP.get(note, "")
-        self.freq = float(freq)
-        self.target = float(target)
-        self.raw_cents = float(cents)
-        self.cents = float(np.clip(cents, -50, 50))
-        self.status = status
+    @property
+    def effective_mode(self):
+        """Modo de instrumento em vigor (MANUAL herda o modo base)."""
+        return self.base_mode if self.tuner_mode == "MANUAL" else self.tuner_mode
+
+    def set_result(self, result, rms, clarity):
+        """Recebe um TunerResult pronto de core/ — a UI não calcula nada."""
+        self.note = result.note
+        self.string_name = result.string_name
+        self.freq = result.freq
+        self.target = result.target
+        self.raw_cents = result.raw_cents
+        self.cents = result.display_cents
+        self.status = result.status
         self.rms = float(rms)
         self.clarity = float(clarity)
-        self.active = active
+        self.active = True
 
     def set_idle(self, rms=0.0, clarity=0.0):
         self.note = "---"
@@ -193,72 +202,140 @@ class BwrldTunerUI(Widget):
         self.clarity = float(clarity)
         self.active = False
 
-    def get_status_text(self):
-        """Status musical baseado em raw_cents. O ponteiro continua limitado em +/-50."""
-        if not self.active:
-            return "STANDBY"
-
-        cents_value = getattr(self, "raw_cents", self.cents)
-        a = abs(cents_value)
-
-        if a <= 3:
-            return "PERFECT"
-        if a <= 5:
-            return "IN TUNE"
-        if a <= 12:
-            return "SLIGHTLY HIGH" if cents_value > 0 else "SLIGHTLY LOW"
-        if a <= 25:
-            return "HIGH" if cents_value > 0 else "LOW"
-        if a <= 80:
-            return "VERY HIGH" if cents_value > 0 else "VERY LOW"
-
-        return "DROP A LOT" if cents_value > 0 else "TIGHTEN A LOT"
-
     def get_active_strings(self):
-        """Returns string lists mapped dynamically to active instrument/tuning presets."""
-        mode = self.base_mode if self.tuner_mode == "MANUAL" else self.tuner_mode
-        if mode == "BASS":
-            return [
-                ("G2", "1ª CORDA", 98.00),
-                ("D2", "2ª CORDA", 73.42),
-                ("A1", "3ª CORDA", 55.00),
-                ("E1", "4ª CORDA", 41.20),
-            ]
-        elif mode == "DROP D":
-            return [
-                ("E4", "1ª CORDA", 329.63),
-                ("B3", "2ª CORDA", 246.94),
-                ("G3", "3ª CORDA", 196.00),
-                ("D3", "4ª CORDA", 146.83),
-                ("A2", "5ª CORDA", 110.00),
-                ("D2", "6ª CORDA", 73.42),
-            ]
-        else:  # CHROMATIC or GUITAR
-            return [
-                ("E4", "1ª CORDA", 329.63),
-                ("B3", "2ª CORDA", 246.94),
-                ("G3", "3ª CORDA", 196.00),
-                ("D3", "4ª CORDA", 146.83),
-                ("A2", "5ª CORDA", 110.00),
-                ("E2", "6ª CORDA", 82.41),
-            ]
+        """Cordas do preset ativo, já na afinação de referência escolhida."""
+        return get_display_tuning(self.effective_mode, self.a4)
 
-    def get_cached_text(self, text, size, bold):
-        """Retrieves or creates cached textures for static text elements."""
-        key = (text, size, bold)
+    # ==========================================
+    # GEOMETRIA — fonte única para desenho e toque
+    # ==========================================
+    # Estas funções são a única definição de onde as coisas ficam. draw_* e
+    # on_touch_down leem daqui, então mudar o layout não desalinha os cliques.
+
+    def layout(self, w, h):
+        """Retângulos dos painéis e a escala tipográfica da janela.
+
+        Com os painéis laterais ocultos, o miolo ocupa a largura toda e a fita
+        fica bem maior — que é o ponto de poder escondê-los.
+        """
+        px_left = MARGEM
+        px_right = w - MARGEM - PANEL_W
+        py_start = FOOTER_H
+        p_height = h - HEADER_H - FOOTER_H
+
+        if self.show_panels:
+            cx0 = px_left + PANEL_W + PANEL_GAP
+            cx1 = px_right - PANEL_GAP
+        else:
+            cx0 = MARGEM
+            cx1 = w - MARGEM
+
+        return {
+            "px_left": px_left,
+            "px_right": px_right,
+            "py_start": py_start,
+            "p_height": p_height,
+            "cx_center": (cx0 + cx1) / 2,
+            "w_center": cx1 - cx0,
+            "centro_x0": cx0,
+            # Escala do conteúdo central: derivada da altura que o bloco
+            # realmente ocupa, com 8% de folga. Em janela pequena tudo encolhe
+            # junto em vez de vazar para o header e o rodapé; em janela grande
+            # para de crescer em 1.0 para não esparramar.
+            "s": max(0.45, min(1.0, (p_height * 0.92) / CENTER_CONTENT_H)),
+        }
+
+    # ── Linha de controles do header ──────
+    # Tudo numa faixa de 30 px de altura, logo abaixo do título. Separar título
+    # e controles em duas linhas é o que permite os botões serem grandes: numa
+    # linha só, a 820 px de largura, eles tinham que encolher para caber.
+
+    def controls_row_y(self, h):
+        """(y, altura) da faixa de controles do cabeçalho."""
+        return h - 68, 30
+
+    def mode_button_rects(self, w, h):
+        """[(nome_do_modo, x, y, largura, altura)] da barra de modos."""
+        y, bh = self.controls_row_y(h)
+        bw, gap = (108, 8) if w >= 1100 else (96, 6)
+        modes = ["CHROMATIC", "GUITAR", "DROP D", "BASS"]
+        total = len(modes) * bw + (len(modes) - 1) * gap
+        x0 = w - MARGEM - total
+        return [(m, x0 + i * (bw + gap), y, bw, bh) for i, m in enumerate(modes)]
+
+    def panels_button_rect(self, w, h):
+        """(x, y, largura, altura) do botão que mostra/oculta os painéis."""
+        return (w - MARGEM - 104, h - 40, 104, 24)
+
+    def preset_row_rects(self, px_right, py_start, p_height):
+        """[(nota, rótulo, hz, x, y, largura, altura)] das linhas de preset.
+
+        As linhas preenchem a altura do painel. O que estragava a versão antiga
+        não era a linha alta e sim o texto de 14 px perdido dentro dela — quem
+        desenha escala a tipografia por `row_h` (ver row_font_size).
+        """
+        strings = self.get_active_strings()
+        n = len(strings)
+        top = py_start + p_height - 46        # abaixo do título do painel
+        bottom = py_start + 58                # acima do botão AUTO MODE
+        row_h = (top - bottom) / n
+
+        return [
+            (nota, rotulo, hz, px_right + 10, top - (i + 1) * row_h, 190, row_h)
+            for i, (nota, rotulo, hz) in enumerate(strings)
+        ]
+
+    @staticmethod
+    def row_font_size(row_h):
+        """(tamanho_da_nota, tamanho_do_rótulo) proporcionais à altura da linha."""
+        nota = int(max(14.0, min(row_h * 0.24, 30.0)))
+        return nota, int(max(9.0, nota * 0.62))
+
+    def reset_button_rect(self, px_right, py_start):
+        """(x, y, largura, altura) do botão AUTO MODE / RESET LOCK."""
+        return (px_right + 15, py_start + 15, 180, 30)
+
+    def lang_button_rect(self, w, h):
+        """(x, y, largura, altura) do botão de idioma — início da linha."""
+        y, bh = self.controls_row_y(h)
+        return (MARGEM, y, 54, bh)
+
+    def reference_button_rects(self, w, h):
+        """[(a4, x, y, largura, altura)] dos botões 440 / 432 / 415.
+
+        Saíram do painel esquerdo para o cabeçalho: o painel pode estar oculto,
+        e a referência precisa continuar acessível.
+        """
+        y, bh = self.controls_row_y(h)
+        bw, gap = (66, 6) if w >= 1100 else (58, 5)
+        lx, _ly, lw, _lh = self.lang_button_rect(w, h)
+        x0 = lx + lw + 44          # espaço para o rótulo "A4"
+        return [
+            (a4, x0 + i * (bw + gap), y, bw, bh)
+            for i, a4 in enumerate(REFERENCE_PITCHES)
+        ]
+
+    @staticmethod
+    def _render_text(text, size, bold, font):
+        lbl = CoreLabel(text=text, font_size=size, bold=bold, font_name=font)
+        lbl.refresh()
+        return lbl.texture
+
+    def get_cached_text(self, text, size, bold, font):
+        """Texturas de texto estático. A fonte entra na chave: sem isso, o
+        mesmo rótulo em duas fontes devolveria a textura errada."""
+        key = (text, size, bold, font)
         if key not in self.text_cache:
-            lbl = CoreLabel(text=text, font_size=size, bold=bold)
-            lbl.refresh()
-            self.text_cache[key] = lbl.texture
+            self.text_cache[key] = self._render_text(text, size, bold, font)
         return self.text_cache[key]
 
-    def _text(self, text, x, y, size=14, color=(1, 1, 1, 1), bold=False, align="center", cache=True):
+    def _text(self, text, x, y, size=14, color=(1, 1, 1, 1), bold=False, align="center",
+              cache=True, font=None):
+        font = font or FONT_UI
         if cache:
-            texture = self.get_cached_text(text, size, bold)
+            texture = self.get_cached_text(text, size, bold, font)
         else:
-            lbl = CoreLabel(text=text, font_size=size, bold=bold)
-            lbl.refresh()
-            texture = lbl.texture
+            texture = self._render_text(text, size, bold, font)
 
         tw, th = texture.size
         if align == "center":
@@ -287,100 +364,120 @@ class BwrldTunerUI(Widget):
     # ==========================================
     def draw_background(self, w, h):
         # Subtle dashboard tech grid in background
-        grid_color = (0.10, 0.11, 0.15, 0.08)
+        grid_color = with_alpha(BORDER, 0.10)
         grid_step = 40
         for gx in range(0, int(w), grid_step):
             self._line([gx, 0, gx, h], grid_color, 1)
         for gy in range(0, int(h), grid_step):
             self._line([0, gy, w, gy], grid_color, 1)
 
+    def _pill(self, x, y, w, h, selecionada, texto, tam=9):
+        """Cápsula clicável no estilo da serigrafia de pedal."""
+        if selecionada:
+            fundo, borda, cor = with_alpha(GREEN, 0.16), with_alpha(GREEN, 0.65), GREEN
+        else:
+            fundo, borda, cor = with_alpha(INK, 0.5), with_alpha(BORDER, 0.7), LABEL
+        self._rounded_rect(x, y, w, h, fundo, h / 2)
+        with self.canvas:
+            Color(*borda)
+            Line(rounded_rectangle=[x, y, w, h, h / 2], width=1)
+        self._text(texto, x + w / 2, y + (h - tam) / 2 - 1, tam, cor, bold=True, align="center", cache=True)
+
     def draw_header(self, w, h):
-        self._text("BWRLD AUTO-TUNER // TELEMETRY PRO", 24, h - 38, 12, (0.50, 0.54, 0.65, 1.0), bold=True, align="left", cache=True)
-        
-        # Display LOCKED indicator capsule if manual mode is active
+        # ── Linha 1: identidade e o botão de painéis ──
+        self._text("BWRLD", MARGEM, h - 32, 15, CREAM, bold=True, align="left", cache=True)
+        self._text(t("APP_SUBTITLE", self.lang), MARGEM + 76, h - 30, 11, LABEL, bold=True, align="left", cache=True)
+
         if self.tuner_mode == "MANUAL" and self.selected_preset:
-            self._rounded_rect(265, h - 45, 95, 22, (1.00, 0.65, 0.00, 0.08), 10)
+            bx = MARGEM + 76 + 190
+            self._rounded_rect(bx, h - 36, 118, 24, with_alpha(AMBER, 0.10), 12)
             with self.canvas:
-                Color(1.00, 0.65, 0.00, 0.35)
-                Line(rounded_rectangle=[265, h - 45, 95, 22, 10], width=1)
-            self._text(f"LOCKED: {self.selected_preset}", 312, h - 39, 9, (1.00, 0.65, 0.00, 1.0), bold=True, align="center", cache=False)
+                Color(*with_alpha(AMBER, 0.40))
+                Line(rounded_rectangle=[bx, h - 36, 118, 24, 12], width=1)
+            self._text(f"{t('LOCKED', self.lang)}: {self.selected_preset}", bx + 59, h - 30, 10,
+                       AMBER, bold=True, align="center", cache=False)
 
-        # Mode Selection Bar inside Header (with click zones)
-        self._text("MODE:", w - 495, h - 38, 11, (0.45, 0.48, 0.58, 1.0), bold=True, align="left", cache=True)
-        
-        for idx, mode_name in enumerate(["CHROMATIC", "GUITAR", "DROP D", "BASS"]):
-            bx = w - 440 + idx * 102
-            by = h - 45
+        px, py, pw, ph = self.panels_button_rect(w, h)
+        self._pill(px, py, pw, ph, self.show_panels, t("PANELS", self.lang), tam=10)
+
+        # ── Linha 2: idioma, referência e modos ──
+        lx, ly, lw, lh = self.lang_button_rect(w, h)
+        self._pill(lx, ly, lw, lh, False, LANGUAGE_LABEL.get(self.lang, "?"), tam=13)
+
+        refs = self.reference_button_rects(w, h)
+        self._text("A4", lx + lw + 14, ly + 8, 12, LABEL, bold=True, align="left", cache=True)
+        for a4, bx, by, bw, bh in refs:
+            self._pill(bx, by, bw, bh, a4 == self.a4, f"{a4:.0f}", tam=13)
+
+        botoes = self.mode_button_rects(w, h)
+        self._text(t("MODE", self.lang), botoes[0][1] - 12, ly + 8, 12, LABEL, bold=True, align="right", cache=True)
+        for mode_name, bx, by, bw, bh in botoes:
             is_sel = (self.tuner_mode == mode_name or (self.tuner_mode == "MANUAL" and self.base_mode == mode_name))
-            
-            if is_sel:
-                capsule_bg = (0.00, 1.00, 0.40, 0.12)
-                capsule_brd = (0.00, 1.00, 0.40, 0.5)
-                text_col = (0.00, 1.00, 0.40, 1.0)
-            else:
-                capsule_bg = (0.06, 0.07, 0.09, 0.3)
-                capsule_brd = (0.15, 0.17, 0.22, 0.6)
-                text_col = (0.42, 0.46, 0.54, 1.0)
+            self._pill(bx, by, bw, bh, is_sel, t(mode_name, self.lang), tam=12)
 
-            self._rounded_rect(bx, by, 92, 22, capsule_bg, 11)
-            with self.canvas:
-                Color(*capsule_brd)
-                Line(rounded_rectangle=[bx, by, 92, 22, 11], width=1)
-            self._text(mode_name, bx + 46, by + 5, 9, text_col, bold=True, align="center", cache=True)
-
-        self._line([24, h - 50, w - 24, h - 50], (0.15, 0.17, 0.22, 1.0), 1.2)
+        self._line([MARGEM, h - HEADER_H + 8, w - MARGEM, h - HEADER_H + 8], BORDER, 1.2)
 
     def draw_left_panel(self, px_left, py_start, p_height):
         top_y = py_start + p_height
         
         # Panel frame
-        panel_bg = (0.07, 0.08, 0.11, 0.65)
-        panel_border = (0.15, 0.17, 0.22, 1.0)
+        panel_bg = with_alpha(PANEL, 0.72)
+        panel_border = BORDER
         self._rounded_rect(px_left, py_start, 210, p_height, panel_bg, 12)
         with self.canvas:
             Color(*panel_border)
             Line(rounded_rectangle=[px_left, py_start, 210, p_height, 12], width=1.2)
 
         # Title
-        self._text("SYSTEM TELEMETRY", px_left + 16, top_y - 25, 11, (0.45, 0.48, 0.58, 1.0), bold=True, align="left", cache=True)
-        self._line([px_left + 16, top_y - 34, px_left + 194, top_y - 34], (0.15, 0.17, 0.22, 1.0), 1)
+        self._text(t("PANEL_TELEMETRY", self.lang), px_left + 16, top_y - 25, 11, LABEL, bold=True, align="left", cache=True)
+        self._line([px_left + 16, top_y - 34, px_left + 194, top_y - 34], BORDER, 1)
 
-        bar_h = p_height - 150
-        bar_y = py_start + 75
+        # Barras preenchendo a altura do painel. O que estragava antes era a
+        # proporção (762x16 = 47:1), não a altura: com 46 px de largura e
+        # marcações de escala elas leem como VU meter de verdade.
+        bar_w = 46
+        rot_y = top_y - 62                    # rótulos abaixo do título
+        bar_top = top_y - 78
+        bar_y = py_start + 104                # espaço para números + badge
+        bar_h = max(40.0, bar_top - bar_y)
 
-        # Bar 1: RMS Signal Level
-        self._text("LEVEL (RMS)", px_left + 16, top_y - 65, 10, (0.45, 0.48, 0.58, 1.0), bold=True, align="left", cache=True)
-        self._rounded_rect(px_left + 26, bar_y, 16, bar_h, (0.09, 0.10, 0.13, 1.0), 5)
-        rms_val = min(self.rms / 0.035, 1.0)
-        fill_h1 = max(bar_h * rms_val, 2)
-        fill_col1 = (1.00, 0.62, 0.00, 1.0) if self.active else (0.22, 0.25, 0.32, 1.0)
-        self._rounded_rect(px_left + 26, bar_y, 16, fill_h1, fill_col1, 5)
+        x_rms = px_left + 26
+        x_clr = px_left + 120
 
-        # Bar 2: Clarity Level
-        self._text("CLARITY", px_left + 116, top_y - 65, 10, (0.45, 0.48, 0.58, 1.0), bold=True, align="left", cache=True)
-        self._rounded_rect(px_left + 126, bar_y, 16, bar_h, (0.09, 0.10, 0.13, 1.0), 5)
-        clar_val = min(max(self.clarity, 0.0), 1.0)
-        fill_h2 = max(bar_h * clar_val, 2)
-        fill_col2 = (0.00, 1.00, 0.40, 1.0) if self.active else (0.22, 0.25, 0.32, 1.0)
-        self._rounded_rect(px_left + 126, bar_y, 16, fill_h2, fill_col2, 5)
+        for x, rotulo, valor, cor_cheia in (
+            (x_rms, t("LEVEL_RMS", self.lang), min(self.rms / 0.035, 1.0), AMBER),
+            (x_clr, t("CLARITY", self.lang), min(max(self.clarity, 0.0), 1.0), GREEN),
+        ):
+            self._text(rotulo, x, rot_y, 10, LABEL, bold=True, align="left", cache=True)
+            self._rounded_rect(x, bar_y, bar_w, bar_h, INK, 8)
+            cor = cor_cheia if self.active else with_alpha(STEEL, 0.6)
+            self._rounded_rect(x, bar_y, bar_w, max(bar_h * valor, 4), cor, 8)
+            # Marcações de escala a cada 25%
+            for frac in (0.25, 0.5, 0.75):
+                ty = bar_y + bar_h * frac
+                self._line([x + bar_w - 9, ty, x + bar_w - 2, ty], with_alpha(BORDER, 0.9), 1.0)
+            with self.canvas:
+                Color(*BORDER)
+                Line(rounded_rectangle=[x, bar_y, bar_w, bar_h, 8], width=1.0)
 
-        # Stats below bars
-        self._text(f"{self.rms:.4f}", px_left + 34, py_start + 48, 12, (0.84, 0.86, 0.92, 1.0), bold=True, align="center", cache=False)
-        self._text("RMS", px_left + 34, py_start + 34, 9, (0.45, 0.48, 0.58, 1.0), bold=True, align="center", cache=True)
+        # Números logo abaixo das barras
+        num_y = bar_y - 28
+        self._text(f"{self.rms:.4f}", x_rms + bar_w / 2, num_y, 13, CREAM, align="center", cache=False, font=FONT_NUM)
+        self._text("RMS", x_rms + bar_w / 2, num_y - 15, 9, LABEL, bold=True, align="center", cache=True)
 
-        self._text(f"{self.clarity:.2f}", px_left + 134, py_start + 48, 12, (0.84, 0.86, 0.92, 1.0), bold=True, align="center", cache=False)
-        self._text("CLARITY", px_left + 134, py_start + 34, 9, (0.45, 0.48, 0.58, 1.0), bold=True, align="center", cache=True)
+        self._text(f"{self.clarity:.2f}", x_clr + bar_w / 2, num_y, 13, CREAM, align="center", cache=False, font=FONT_NUM)
+        self._text(t("CLARITY", self.lang), x_clr + bar_w / 2, num_y - 15, 9, LABEL, bold=True, align="center", cache=True)
 
-        # Signal status evaluations (LOW, NOISY, OK)
+        # Avaliação do sinal (fraco / sujo / ok)
         if self.rms < RMS_TRIGGER:
-            sig_status = "SIGNAL: LOW"
-            sig_color = (1.00, 0.62, 0.00, 1.0)  # Amber
+            sig_status = t("SIGNAL_LOW", self.lang)
+            sig_color = AMBER
         elif self.clarity < CLARITY_TRIGGER:
-            sig_status = "SIGNAL: NOISY"
-            sig_color = (1.00, 0.20, 0.25, 1.0)  # Red
+            sig_status = t("SIGNAL_NOISY", self.lang)
+            sig_color = BRICK
         else:
-            sig_status = "SIGNAL: OK"
-            sig_color = (0.00, 1.00, 0.40, 1.0)  # Green
+            sig_status = t("SIGNAL_OK", self.lang)
+            sig_color = GREEN
 
         bx = px_left + 26
         by = py_start + 12
@@ -392,213 +489,249 @@ class BwrldTunerUI(Widget):
             Line(rounded_rectangle=[bx, by, badge_w, badge_h, 10], width=1.0)
         self._text(sig_status, px_left + 105, by + 4, 10, sig_color, bold=True, align="center", cache=False)
 
-    def draw_center_panel(self, cx, cy, w_center, p_height, main_color):
-        px_left = 24
-        py_start = 42
-        panel_bg = (0.07, 0.08, 0.11, 0.4)
-        panel_border = (0.15, 0.17, 0.22, 1.0)
-        self._rounded_rect(px_left + 226, py_start, w_center, p_height, panel_bg, 12)
+    def draw_center_panel(self, geo, main_color):
+        """Moldura do miolo. As bordas vêm de layout(), então ela acompanha a
+        largura extra quando os painéis laterais estão ocultos."""
+        x = geo["centro_x0"]
+        y = geo["py_start"]
+        self._rounded_rect(x, y, geo["w_center"], geo["p_height"], with_alpha(PANEL, 0.45), 12)
         with self.canvas:
-            Color(*panel_border)
-            Line(rounded_rectangle=[px_left + 226, py_start, w_center, p_height, 12], width=1.2)
+            Color(*BORDER)
+            Line(rounded_rectangle=[x, y, geo["w_center"], geo["p_height"], 12], width=1.2)
 
-    def draw_speedometer(self, cx, cy, radius, main_color):
-        # 1. Outer Tachometer Scale Frame (140° to 40°)
-        scale_color = (0.12, 0.14, 0.19, 1.0)
-        self._line(arc_points(cx, cy, radius, 140, 40, steps=64), scale_color, 4)
+    def _meter_x(self, cx, half, cents):
+        """Posição horizontal de um valor em cents dentro da fita."""
+        c = max(-METER_RANGE, min(METER_RANGE, cents))
+        return cx + (c / METER_RANGE) * half
 
-        # 2. Dynamic Tachometer Fill (0 cents at 90° fills out to current cents)
+    def draw_strip_meter(self, cx, cy, strip_w, s, main_color):
+        """Fita linear de cents com detente central.
+
+        cy é a linha de centro do trilho. A leitura acontece pela posição do
+        cursor e pelo comprimento da barra que cresce a partir do zero — os dois
+        legíveis de relance, sem precisar ler número.
+        """
+        half = strip_w / 2.0
+        track_h = 96 * s
+        ty = cy - track_h / 2.0
+        afinado = self.active and abs(self.raw_cents) <= IN_TUNE_CENTS
+
+        # 1. Trilho
+        self._rounded_rect(cx - half, ty, strip_w, track_h, INK, track_h / 2)
+        with self.canvas:
+            Color(*BORDER)
+            Line(rounded_rectangle=[cx - half, ty, strip_w, track_h, track_h / 2], width=1.2)
+
+        # 2. Zona afinada (±5 cents) — acende forte quando você chega nela
+        zx0 = self._meter_x(cx, half, -IN_TUNE_CENTS)
+        zx1 = self._meter_x(cx, half, IN_TUNE_CENTS)
+        self._rounded_rect(zx0, ty + 3, zx1 - zx0, track_h - 6,
+                           with_alpha(GREEN, 0.22 if afinado else 0.07), 5)
+
+        # 3. Barra de desvio, crescendo do centro para o lado do erro
         if self.active:
-            cents_ang = angle_for_cents(self.cents)
-            self._line(arc_points(cx, cy, radius, 90.0, cents_ang, steps=32), main_color, 4.5)
-            # Soft neon glow behind fill arc
-            glow_col = (main_color[0], main_color[1], main_color[2], 0.18)
-            self._line(arc_points(cx, cy, radius, 90.0, cents_ang, steps=32), glow_col, 10)
+            cur = self._meter_x(cx, half, self.needle_cents)
+            x0 = min(cx, cur)
+            bw = max(abs(cur - cx), 3.0)
+            # brilho por trás, depois a barra sólida
+            self._rounded_rect(x0, ty + 2, bw, track_h - 4, with_alpha(main_color, 0.20), 5)
+            self._rounded_rect(x0, ty + 7, bw, track_h - 14, main_color, 4)
 
-        # 3. Tachometer Scale Ticks (Colored dynamically: green center, yellow near, red extremes)
+        # 4. Marcações acima do trilho
+        tick_base = ty + track_h + 7 * s
         for c in range(-50, 51, 5):
-            ang = angle_for_cents(c)
-            is_major = c % 25 == 0
-            is_medium = c % 10 == 0
+            x = self._meter_x(cx, half, c)
+            maior = (c % 25 == 0)
+            medio = (c % 10 == 0)
+            tl = (15 if maior else 9 if medio else 5) * s
+            tw = 2.0 if maior else 1.2 if medio else 0.8
+            self._line([x, tick_base, x, tick_base + tl],
+                       with_alpha(zone_color(c), 0.9 if maior else 0.5), tw)
 
-            tick_len = 14 if is_major else 9 if is_medium else 5
-            tick_width = 2.0 if is_major else 1.2 if is_medium else 0.8
-            
-            # Map tick color zones (automotive sportscar theme)
-            a_c = abs(c)
-            if a_c <= 5:
-                tick_color = (0.00, 1.00, 0.40, 1.0)  # Neon green (tuned zone)
-            elif a_c <= 25:
-                tick_color = (1.00, 0.65, 0.00, 1.0)  # Neon amber (warn zone)
-            else:
-                tick_color = (1.00, 0.20, 0.25, 1.0)  # Neon red (limit zone)
-
-            if c == 0:
-                tick_len = 18
-                tick_width = 2.5
-
-            x1, y1 = polar(cx, cy, radius - tick_len, ang)
-            x2, y2 = polar(cx, cy, radius, ang)
-            self._line([x1, y1, x2, y2], tick_color, tick_width)
-
-        # 4. Scale Labels
-        for c, lbl, f_size in [(-50, "-50c", 10), (-25, "-25", 9), (0, "0", 12), (25, "+25", 9), (50, "+50c", 10)]:
-            ang = angle_for_cents(c)
-            lx, ly = polar(cx, cy, radius - 28, ang)
-            a_c = abs(c)
-            if a_c <= 5:
-                lbl_color = (0.00, 1.00, 0.40, 1.0)
-            elif a_c <= 25:
-                lbl_color = (1.00, 0.65, 0.00, 1.0)
-            else:
-                lbl_color = (1.00, 0.20, 0.25, 1.0)
-            self._text(lbl, lx, ly - 5, f_size, lbl_color, bold=(c == 0), cache=True)
-
-        # 5. Elegant Rim Needle (Triangular outer cursor, index needle tick)
-        target_needle = self.cents if self.active else 0.0
-        self.needle_cents += (target_needle - self.needle_cents) * 0.15
-        needle_ang = angle_for_cents(self.needle_cents)
-
-        tx, ty = polar(cx, cy, radius + 2, needle_ang)
-        bx1, by1 = polar(cx, cy, radius + 8, needle_ang - 2.2)
-        bx2, by2 = polar(cx, cy, radius + 8, needle_ang + 2.2)
-
+        # 5. Detente central: a referência mais importante da tela
+        det_h = 26 * s
+        self._line([cx, ty - det_h * 0.35, cx, ty], with_alpha(GREEN, 0.9), 2.2)
         with self.canvas:
-            Color(*main_color)
-            # Sharp index tick crossing the scale arc line
-            x_idx1, y_idx1 = polar(cx, cy, radius - 6, needle_ang)
-            x_idx2, y_idx2 = polar(cx, cy, radius + 2, needle_ang)
-            Line(points=[x_idx1, y_idx1, x_idx2, y_idx2], width=2.0)
-            
-            # Cursor triangle sitting exactly over the outer arc
-            Triangle(points=[tx, ty, bx1, by1, bx2, by2])
-            
-            # Subtly darker border line backing
-            Color(0.0, 0.0, 0.0, 0.35)
-            Line(points=[bx1, by1, bx2, by2], width=1)
+            Color(*with_alpha(GREEN, 0.95))
+            Triangle(points=[
+                cx, tick_base + 4 * s,
+                cx - 7 * s, tick_base + 15 * s,
+                cx + 7 * s, tick_base + 15 * s,
+            ])
 
-    def draw_note_info(self, cx, cy, main_color):
-        # 1. Main Note Display
+        # 6. Cursor sobre a posição atual
         if self.active:
-            # Subtle radial backdrop glow behind active note
+            cur = self._meter_x(cx, half, self.needle_cents)
             with self.canvas:
-                Color(main_color[0], main_color[1], main_color[2], 0.05)
-                Ellipse(pos=(cx - 60, cy + 5), size=(120, 100))
-            self._text(self.note, cx, cy + 15, 72, main_color, bold=True, cache=False)
-        else:
-            self._text("---", cx, cy + 15, 70, (0.20, 0.23, 0.30, 1.0), bold=True, cache=True)
+                Color(*main_color)
+                Line(points=[cur, ty + 3, cur, ty + track_h - 3], width=2.4)
+                Triangle(points=[
+                    cur, ty - 3 * s,
+                    cur - 8 * s, ty - 15 * s,
+                    cur + 8 * s, ty - 15 * s,
+                ])
 
-        # 2. Frequencies Readout
+        # 7. Rótulos da escala
+        for c, lbl in [(-50, "-50"), (-25, "-25"), (0, "0"), (25, "+25"), (50, "+50")]:
+            x = self._meter_x(cx, half, c)
+            # Folga constante acima da marcação mais longa (15 * s): em escala
+            # pequena um espaçamento proporcional encostava o rótulo no tick.
+            self._text(lbl, x, tick_base + 15 * s + 7, _fs(11, s, 9),
+                       with_alpha(zone_color(c), 0.95), bold=(c == 0), cache=True)
+
+        return tick_base + 32 * s  # topo ocupado pela fita
+
+    def draw_readout(self, cx, top_y, s, main_color):
+        """Nota grande, corda, Hz e cents. Retorna a altura consumida."""
+        y = top_y
+
+        # 1. Nota
+        tam_nota = int(150 * s)
         if self.active:
-            self._text(f"{self.freq:.2f} Hz", cx, cy - 50, 18, (0.92, 0.94, 0.98, 1.0), bold=False, cache=False)
-            self._text(f"TARGET: {self.target:.2f} Hz", cx, cy - 72, 11, (0.42, 0.46, 0.55, 1.0), bold=True, cache=False)
+            self._text(self.note, cx, y - tam_nota, tam_nota, main_color, bold=True, cache=False)
         else:
-            self._text("WAITING SIGNAL", cx, cy - 50, 12, (0.35, 0.38, 0.46, 1.0), bold=True, cache=True)
+            self._text("---", cx, y - tam_nota, tam_nota, with_alpha(STEEL, 0.55), bold=True, cache=True)
+        y -= tam_nota + 10 * s
 
-        # 3. Cents Deviation
+        # 2. Corda (ex: 6ª CORDA) — só existe nos presets, não no cromático
+        if self.active and self.string_name:
+            self._text(t(self.string_name, self.lang), cx, y - 18 * s, _fs(15, s, 10), LABEL, bold=True, cache=True)
+        y -= 34 * s
+
+        return top_y - y
+
+    def draw_numbers(self, cx, top_y, s, main_color):
+        """Hz medido, alvo e desvio em cents, abaixo da fita."""
+        y = top_y
+
         if self.active:
-            cents_value = getattr(self, "raw_cents", self.cents)
-            sign = "+" if cents_value > 0 else ""
-            self._text(f"{sign}{cents_value:.1f} CENTS", cx, cy - 94, 13, main_color, bold=True, cache=False)
+            sinal = "+" if self.raw_cents > 0 else ""
+            self._text(f"{sinal}{self.raw_cents:.1f}", cx, y - 26 * s, _fs(26, s, 12),
+                       main_color, cache=False, font=FONT_NUM)
+            self._text(t("CENTS", self.lang), cx, y - 46 * s, _fs(12, s, 9),
+                       LABEL, bold=True, cache=True)
+            y -= 60 * s
+            self._text(f"{self.freq:.2f} Hz", cx, y - 24 * s, _fs(22, s, 12),
+                       CREAM, cache=False, font=FONT_NUM)
+            y -= 34 * s
+            self._text(f"{t('TARGET', self.lang)} {self.target:.2f} Hz", cx, y - 15 * s, _fs(13, s, 9),
+                       LABEL, bold=True, cache=False)
+            y -= 30 * s
         else:
-            self._text("NO SOURCE", cx, cy - 94, 11, (0.28, 0.31, 0.38, 1.0), bold=True, cache=True)
+            self._text(t("WAITING_SIGNAL", self.lang), cx, y - 20 * s, _fs(16, s, 10), STEEL, bold=True, cache=True)
+            y -= 108 * s
 
-        # 4. Status Badge Capsule (Precise V6.2 levels, no emojis)
-        badge_w = 170
-        badge_h = 24
-        bx = cx - badge_w / 2
-        by = cy - 138
-
-        capsule_bg = (main_color[0], main_color[1], main_color[2], 0.08) if self.active else (0.09, 0.10, 0.12, 0.3)
-        capsule_border = (main_color[0], main_color[1], main_color[2], 0.28) if self.active else (0.16, 0.18, 0.23, 0.4)
-
-        self._rounded_rect(bx, by, badge_w, badge_h, capsule_bg, 12)
+        # Cápsula de status
+        badge_w, badge_h = 240 * s, 40 * s
+        bx, by = cx - badge_w / 2, y - badge_h
+        fundo = with_alpha(main_color, 0.10) if self.active else with_alpha(INK, 0.4)
+        borda = with_alpha(main_color, 0.32) if self.active else with_alpha(BORDER, 0.5)
+        self._rounded_rect(bx, by, badge_w, badge_h, fundo, badge_h / 2)
         with self.canvas:
-            Color(*capsule_border)
-            Line(rounded_rectangle=[bx, by, badge_w, badge_h, 12], width=1.0)
+            Color(*borda)
+            Line(rounded_rectangle=[bx, by, badge_w, badge_h, badge_h / 2], width=1.0)
+        self._text(t(self.status, self.lang), cx, by + 12 * s, _fs(14, s, 10),
+                   main_color, bold=True, cache=False)
 
-        # Map dynamic status text
-        status_lbl = self.get_status_text().upper()
-        self._text(status_lbl, cx, by + 5, 10, main_color, bold=True, cache=False)
+    def draw_center_content(self, geo, main_color):
+        """Empilha nota, fita e números centralizados no painel do meio.
+
+        Alturas fixas escaladas por `s`, não frações da altura disponível: é o
+        que impede o vão gigante que aparecia em tela grande.
+        """
+        cx = geo["cx_center"]
+        s = geo["s"]
+        # Teto maior que antes: sem os painéis laterais sobra largura, e fita
+        # mais larga = mais resolução visual perto do zero.
+        strip_w = max(240.0, min(geo["w_center"] * 0.82, 1400.0))
+
+        h_nota = CENTER_NOTE_H * s
+        h_fita = CENTER_METER_H * s
+        h_num = CENTER_NUM_H * s
+        gap = CENTER_GAP * s
+        total = CENTER_CONTENT_H * s
+
+        topo = geo["py_start"] + geo["p_height"] / 2 + total / 2
+
+        self.draw_readout(cx, topo, s, main_color)
+        cy_fita = topo - h_nota - gap - h_fita / 2
+        self.draw_strip_meter(cx, cy_fita, strip_w, s, main_color)
+        self.draw_numbers(cx, cy_fita - h_fita / 2 - gap, s, main_color)
+
+        # Suavização do cursor (frame a frame, ~60 fps)
+        alvo = self.cents if self.active else 0.0
+        self.needle_cents += (alvo - self.needle_cents) * 0.18
 
     def draw_right_panel(self, px_right, py_start, p_height, main_color):
         top_y = py_start + p_height
         
         # Panel frame
-        panel_bg = (0.07, 0.08, 0.11, 0.65)
-        panel_border = (0.15, 0.17, 0.22, 1.0)
+        panel_bg = with_alpha(PANEL, 0.72)
+        panel_border = BORDER
         self._rounded_rect(px_right, py_start, 210, p_height, panel_bg, 12)
         with self.canvas:
             Color(*panel_border)
             Line(rounded_rectangle=[px_right, py_start, 210, p_height, 12], width=1.2)
 
         # Title
-        self._text("GUITAR PRESETS", px_right + 16, top_y - 25, 11, (0.45, 0.48, 0.58, 1.0), bold=True, align="left", cache=True)
-        self._line([px_right + 16, top_y - 34, px_right + 194, top_y - 34], (0.15, 0.17, 0.22, 1.0), 1)
+        chave = "PANEL_PRESETS_BASS" if self.effective_mode == "BASS" else "PANEL_PRESETS_GUITAR"
+        titulo = t(chave, self.lang)
+        self._text(titulo, px_right + 16, top_y - 25, 11, LABEL, bold=True, align="left", cache=True)
+        self._line([px_right + 16, top_y - 34, px_right + 194, top_y - 34], BORDER, 1)
 
-        # Dynamic string rows based on instrument list
-        strings = self.get_active_strings()
-        n_strings = len(strings)
-        row_h = (p_height - 105) / n_strings  # Leaves 65px at bottom for the manual reset button
+        # Linhas de preset (geometria vinda de preset_row_rects)
+        for note_key, note_label, target_hz, rx, ry_min, rw, row_h in self.preset_row_rects(px_right, py_start, p_height):
+            ry = ry_min + row_h / 2  # linha de centro da linha
 
-        for idx, (note_key, note_label, target_hz) in enumerate(strings):
-            ry = py_start + 65 + (n_strings - 1 - idx) * row_h + row_h / 2
-            
-            # Determine selection: locked manual note, or active auto pitch
+            # Seleção: nota travada manualmente, ou nota detectada no automático
             if self.selected_preset is not None:
                 is_selected = (self.selected_preset == note_key)
             else:
                 is_selected = self.active and (self.note == note_key)
 
-            row_color = main_color if is_selected else (0.28, 0.31, 0.38, 1.0)
+            row_color = main_color if is_selected else STEEL
 
-            # Discrete Green Glow capsule behind row if selected
+            # Cápsula acesa atrás da linha selecionada
             if is_selected:
-                glow_bg = (0.00, 1.00, 0.40, 0.08)
-                glow_border = (0.00, 1.00, 0.40, 0.25)
-                self._rounded_rect(px_right + 10, ry - row_h / 2 + 3, 190, row_h - 6, glow_bg, 8)
+                self._rounded_rect(rx, ry_min + 3, rw, row_h - 6, with_alpha(GREEN, 0.08), 8)
                 with self.canvas:
-                    Color(*glow_border)
-                    Line(rounded_rectangle=[px_right + 10, ry - row_h / 2 + 3, 190, row_h - 6, 8], width=1.0)
+                    Color(*with_alpha(GREEN, 0.25))
+                    Line(rounded_rectangle=[rx, ry_min + 3, rw, row_h - 6, 8], width=1.0)
 
-            # LED Indicator dot
+            # LED
             with self.canvas:
                 if is_selected:
-                    Color(0.00, 1.00, 0.40, 1.0)
+                    Color(*GREEN)
                     Ellipse(pos=(px_right + 20, ry - 5), size=(10, 10))
-                    Color(0.00, 1.00, 0.40, 0.25)
+                    Color(*with_alpha(GREEN, 0.25))
                     Line(circle=(px_right + 25, ry, 9), width=1.5)
                 else:
-                    Color(0.16, 0.18, 0.23, 1.0)
+                    Color(*BORDER)
                     Line(circle=(px_right + 25, ry, 5), width=1.5)
 
-            # Note Name
-            note_txt_col = (0.94, 0.96, 1.00, 1.0) if is_selected else (0.45, 0.48, 0.58, 1.0)
-            self._text(note_key, px_right + 42, ry - 6, 14, note_txt_col, bold=True, align="left", cache=True)
+            f_nota, f_lbl = self.row_font_size(row_h)
 
-            # Label (e.g. 1ª CORDA)
-            lbl_txt_col = (0.65, 0.68, 0.76, 1.0) if is_selected else (0.32, 0.35, 0.42, 1.0)
-            self._text(note_label, px_right + 78, ry - 5, 10, lbl_txt_col, bold=False, align="left", cache=True)
+            note_txt_col = CREAM if is_selected else LABEL
+            self._text(note_key, px_right + 42, ry - f_nota * 0.42, f_nota, note_txt_col, bold=True, align="left", cache=True)
 
-            # Frequency Label
-            self._text(f"{target_hz:.1f} Hz", px_right + 192, ry - 6, 12, row_color, bold=is_selected, align="right", cache=True)
+            lbl_txt_col = with_alpha(CREAM, 0.75) if is_selected else STEEL
+            self._text(t(note_label, self.lang), px_right + 42, ry - f_nota * 0.42 - f_lbl - 4, f_lbl, lbl_txt_col, bold=False, align="left", cache=True)
 
-        # Auto Mode / Manual Lock Indicator Button at the bottom of Right Panel
-        btn_w = 180
-        btn_h = 30
-        btn_x = px_right + 15
-        btn_y = py_start + 15
+            self._text(f"{target_hz:.1f} Hz", px_right + 192, ry - f_lbl * 0.5, f_lbl + 2, row_color, align="right", cache=True, font=FONT_NUM)
+
+        # Botão AUTO MODE / RESET LOCK
+        btn_x, btn_y, btn_w, btn_h = self.reset_button_rect(px_right, py_start)
 
         if self.selected_preset is not None:
-            btn_bg = (0.00, 1.00, 0.40, 0.08)
-            btn_brd = (0.00, 1.00, 0.40, 0.6)
-            btn_txt = "RESET LOCK"
-            btn_color = (0.00, 1.00, 0.40, 1.0)
+            btn_bg = with_alpha(GREEN, 0.10)
+            btn_brd = with_alpha(GREEN, 0.6)
+            btn_txt = t("RESET_LOCK", self.lang)
+            btn_color = GREEN
         else:
-            btn_bg = (0.06, 0.07, 0.09, 0.2)
-            btn_brd = (0.12, 0.14, 0.18, 0.5)
-            btn_txt = "AUTO MODE"
-            btn_color = (0.32, 0.35, 0.42, 1.0)
+            btn_bg = with_alpha(INK, 0.35)
+            btn_brd = with_alpha(BORDER, 0.55)
+            btn_txt = t("AUTO_MODE", self.lang)
+            btn_color = STEEL
 
         self._rounded_rect(btn_x, btn_y, btn_w, btn_h, btn_bg, 8)
         with self.canvas:
@@ -607,9 +740,27 @@ class BwrldTunerUI(Widget):
         self._text(btn_txt, btn_x + btn_w / 2, btn_y + 8, 10, btn_color, bold=True, align="center", cache=True)
 
     def draw_footer(self, w, h):
-        self._line([24, 34, w - 24, 34], (0.15, 0.17, 0.22, 1.0), 1.0)
-        self._text("BWRLD AUDIO ENGINE V6.2 // EXPERT TUNING MODES ACTIVE", 24, 15, 9, (0.32, 0.35, 0.42, 1.0), bold=True, align="left", cache=True)
-        self._text("SR: 44.1 KHZ // BLOCK: 4096 // WIN32 DIRECTSOUND", w - 24, 15, 9, (0.32, 0.35, 0.42, 1.0), bold=True, align="right", cache=True)
+        self._line([MARGEM, 34, w - MARGEM, 34], BORDER, 1.0)
+        self._text(ENGINE_LABEL, MARGEM, 15, 9, STEEL, bold=True, align="left", cache=True)
+
+        # Estado do sinal fica sempre visível, mesmo com o painel oculto: é a
+        # informação do painel esquerdo que você realmente precisa de relance
+        # ("o afinador não reage" quase sempre é sinal fraco).
+        if self.rms < RMS_TRIGGER:
+            sig_txt, sig_cor = t("SIGNAL_LOW", self.lang), AMBER
+        elif self.clarity < CLARITY_TRIGGER:
+            sig_txt, sig_cor = t("SIGNAL_NOISY", self.lang), BRICK
+        else:
+            sig_txt, sig_cor = t("SIGNAL_OK", self.lang), GREEN
+
+        cx = w / 2
+        with self.canvas:
+            Color(*sig_cor)
+            Ellipse(pos=(cx - 74, 17), size=(7, 7))
+        self._text(sig_txt, cx - 60, 15, 9, sig_cor, bold=True, align="left", cache=True)
+        self._text(f"{self.rms:.4f} / {self.clarity:.2f}", cx + 74, 15, 9, STEEL, align="left", cache=False, font=FONT_NUM)
+
+        self._text(f"A4 {self.a4:.0f} HZ   /   {FS/1000:.1f} KHZ   /   {BLOCKSIZE}", w - MARGEM, 15, 9, STEEL, bold=True, align="right", cache=True)
 
     def draw(self, dt):
         self.canvas.clear()
@@ -619,26 +770,23 @@ class BwrldTunerUI(Widget):
 
         main_color = color_for_cents(self.cents, self.active)
 
-        # Dynamic Symmetrical Boundaries
-        px_left = 24
-        px_right = w - 234
-        w_center = px_right - px_left - 242
-        py_start = 42
-        p_height = h - 110
-
-        # Gauge dimensions
-        cx = px_left + 226 + w_center / 2
-        cy = py_start + p_height * 0.42
-        radius = min(w_center * 0.48, p_height * 0.42)
+        geo = self.layout(w, h)
+        px_left = geo["px_left"]
+        px_right = geo["px_right"]
+        py_start = geo["py_start"]
+        p_height = geo["p_height"]
+        w_center = geo["w_center"]
+        cx = geo["cx_center"]
+        cy = py_start + p_height / 2
 
         # Modular execution blocks
         self.draw_background(w, h)
         self.draw_header(w, h)
-        self.draw_left_panel(px_left, py_start, p_height)
-        self.draw_center_panel(cx, cy, w_center, p_height, main_color)
-        self.draw_speedometer(cx, cy, radius, main_color)
-        self.draw_note_info(cx, cy, main_color)
-        self.draw_right_panel(px_right, py_start, p_height, main_color)
+        if self.show_panels:
+            self.draw_left_panel(px_left, py_start, p_height)
+            self.draw_right_panel(px_right, py_start, p_height, main_color)
+        self.draw_center_panel(geo, main_color)
+        self.draw_center_content(geo, main_color)
         self.draw_footer(w, h)
 
     def on_touch_down(self, touch):
@@ -647,45 +795,59 @@ class BwrldTunerUI(Widget):
         if w <= 10 or h <= 10:
             return super().on_touch_down(touch)
 
-        px_right = w - 234
-        py_start = 42
-        p_height = h - 110
+        geo = self.layout(w, h)
+        px_right = geo["px_right"]
+        py_start = geo["py_start"]
+        p_height = geo["p_height"]
 
-        # 1. Click Header Mode Bar
-        if h - 45 <= touch.y <= h - 21:
-            for idx, mode_name in enumerate(["CHROMATIC", "GUITAR", "DROP D", "BASS"]):
-                bx_start = w - 440 + idx * 102
-                bx_end = bx_start + 92
-                if bx_start <= touch.x <= bx_end:
+        # 1. Botão de idioma
+        lx, ly, lw, lh = self.lang_button_rect(w, h)
+        if lx <= touch.x <= lx + lw and ly <= touch.y <= ly + lh:
+            self.lang = next_language(self.lang)
+            print(f"[TUNER] Idioma: {self.lang}")
+            return True
+
+        # 1b. Mostrar/ocultar painéis laterais
+        px, py, pw, ph = self.panels_button_rect(w, h)
+        if px <= touch.x <= px + pw and py <= touch.y <= py + ph:
+            self.show_panels = not self.show_panels
+            print(f"[TUNER] Painéis: {'visíveis' if self.show_panels else 'ocultos'}")
+            return True
+
+        # 2. Seletor de afinação de referência
+        for a4, bx, by, bw, bh in self.reference_button_rects(w, h):
+            if bx <= touch.x <= bx + bw and by <= touch.y <= by + bh:
+                if a4 != self.a4:
+                    self.a4 = a4
+                    self.needs_history_reset = True  # alvos mudaram: descarta leitura antiga
+                    print(f"[TUNER] Afinação de referência: A4 = {a4:.0f} Hz")
+                return True
+
+        # 3. Barra de modos no header
+        for mode_name, bx, by, bw, bh in self.mode_button_rects(w, h):
+            if bx <= touch.x <= bx + bw and by <= touch.y <= by + bh:
+                self.selected_preset = None
+                self.tuner_mode = mode_name
+                self.base_mode = mode_name
+                self.needs_history_reset = True  # Flush stale history on mode switch
+                print(f"[TUNER] Active mode set to {mode_name}")
+                return True
+
+        # 4. Painel direito — só recebe clique quando está visível
+        if self.show_panels and px_right <= touch.x <= px_right + PANEL_W and py_start <= touch.y <= py_start + p_height:
+            # Botão AUTO MODE / RESET LOCK
+            rx, ry, rw, rh = self.reset_button_rect(px_right, py_start)
+            if rx <= touch.x <= rx + rw and ry <= touch.y <= ry + rh:
+                if self.selected_preset is not None:
                     self.selected_preset = None
-                    self.tuner_mode = mode_name
-                    self.base_mode = mode_name
-                    self.needs_history_reset = True  # Flush stale history on mode switch
-                    print(f"[TUNER] Active mode set to {mode_name}")
+                    self.tuner_mode = self.base_mode
+                    self.needs_history_reset = True  # Flush history on manual unlock
+                    print(f"[TUNER] Reset manual lock. Restored mode: {self.tuner_mode}")
                     return True
 
-        # 2. Click Right Panel Bounds
-        if px_right <= touch.x <= px_right + 210 and py_start <= touch.y <= py_start + p_height:
-            # Check if auto reset button clicked
-            if py_start + 15 <= touch.y <= py_start + 45:
-                if px_right + 15 <= touch.x <= px_right + 195:
-                    if self.selected_preset is not None:
-                        self.selected_preset = None
-                        self.tuner_mode = self.base_mode
-                        self.needs_history_reset = True  # Flush history on manual unlock
-                        print(f"[TUNER] Reset manual lock. Restored mode: {self.tuner_mode}")
-                        return True
-
-            # Check if dynamic preset rows clicked
-            strings = self.get_active_strings()
-            n_strings = len(strings)
-            row_h = (p_height - 105) / n_strings
-
-            for idx in range(n_strings):
-                ry_min = py_start + 65 + (n_strings - 1 - idx) * row_h
-                ry_max = ry_min + row_h
-                if ry_min <= touch.y <= ry_max:
-                    preset_note = strings[idx][0]
+            # Linhas de preset
+            for preset_note, _label, _hz, _rx, ry_min, _rw, row_h in self.preset_row_rects(px_right, py_start, p_height):
+                if ry_min <= touch.y <= ry_min + row_h:
                     if self.selected_preset == preset_note:
                         self.selected_preset = None
                         self.tuner_mode = self.base_mode
@@ -703,14 +865,24 @@ class BwrldTunerUI(Widget):
 
 class BwrldTunerApp(App):
     def build(self):
-        self.title = "BWRLD Tuner Pro"
+        self.title = WINDOW_TITLE
         self.ui = BwrldTunerUI()
 
+        # A thread de áudio só entrega números crus. Toda a decisão musical
+        # acontece na thread do Kivy, dentro do pipeline — nada compartilhado.
         self.lock = Lock()
         self.pending = None
-        self.last_signal_time = 0
-        self.freq_history = deque(maxlen=HISTORY_SIZE)
-        self.cents_history = deque(maxlen=HISTORY_SIZE)
+        self.last_rms = 0.0
+        self.last_clarity = 0.0
+
+        self.pipeline = TunerPipeline(
+            mode=self.ui.tuner_mode,
+            history_size=HISTORY_SIZE,
+            hold_time=HOLD_TIME,
+            rms_threshold=RMS_TRIGGER,
+            clarity_threshold=CLARITY_TRIGGER,
+            a4=self.ui.a4,
+        )
 
         self.start_audio()
         Clock.schedule_interval(self.apply_audio_data, 1 / 45)
@@ -720,9 +892,9 @@ class BwrldTunerApp(App):
         def callback(indata, frames, time_info, status):
             audio = indata[:, 0].copy()
 
-            # Dynamic MIN_FREQ selection to support BASS E1 (41.20 Hz) and A1 (55.00 Hz)
-            active_mode = self.ui.tuner_mode if hasattr(self, 'ui') else "CHROMATIC"
-            m_freq = 30 if active_mode == "BASS" else 55
+            # MIN_FREQ dinâmico para alcançar o BASS (E1 = 41.20 Hz).
+            # Usa effective_mode: travar manualmente em E1 mantém o modo BASS.
+            m_freq = get_min_freq(self.ui.effective_mode)
 
             freq, rms, clarity = detectar_frequencia(
                 audio,
@@ -733,71 +905,8 @@ class BwrldTunerApp(App):
                 clarity_threshold=CLARITY_TRIGGER,
             )
 
-            if freq is None:
-                with self.lock:
-                    self.pending = {"active": False, "rms": rms, "clarity": clarity}
-                return
-
-            # Apply Pitch Matching dynamically in callback thread based on active mode
-            if active_mode == "MANUAL" and hasattr(self, 'ui') and self.ui.selected_preset:
-                preset_note = self.ui.selected_preset
-                strings = self.ui.get_active_strings()
-                target = next((hz for key, label, hz in strings if key == preset_note), 82.41)
-                note = preset_note
-            elif active_mode == "BASS":
-                note, target = encontrar_nota_bass(freq)
-            elif active_mode == "DROP D":
-                note, target = encontrar_nota_drop_d(freq)
-            elif active_mode == "GUITAR":
-                note, target = encontrar_nota_guitar(freq)
-            else:  # CHROMATIC auto mode
-                note, target = encontrar_nota_cromatica(freq)
-
-            cents = cents_between(freq, target)
-
-            # Correction 1: Only drop outliers in CHROMATIC mode.
-            # In GUITAR, DROP D, BASS and MANUAL the string may be very far from
-            # target at the start — rejecting those frames causes blinking.
-            if active_mode == "CHROMATIC" and abs(cents) > 85:
-                with self.lock:
-                    self.pending = {"active": False, "rms": rms, "clarity": clarity}
-                return
-
-            self.freq_history.append(freq)
-            self.cents_history.append(cents)
-
-            smooth_freq = float(np.median(self.freq_history))
-            smooth_cents = float(np.median(self.cents_history))
-
-            # Recalculate target for the smoothed freq to match selected mode
-            if active_mode == "MANUAL" and hasattr(self, 'ui') and self.ui.selected_preset:
-                smooth_note = self.ui.selected_preset
-                strings = self.ui.get_active_strings()
-                smooth_target = next((hz for key, label, hz in strings if key == smooth_note), 82.41)
-            elif active_mode == "BASS":
-                smooth_note, smooth_target = encontrar_nota_bass(smooth_freq)
-            elif active_mode == "DROP D":
-                smooth_note, smooth_target = encontrar_nota_drop_d(smooth_freq)
-            elif active_mode == "GUITAR":
-                smooth_note, smooth_target = encontrar_nota_guitar(smooth_freq)
-            else:
-                smooth_note, smooth_target = encontrar_nota_cromatica(smooth_freq)
-
-            smooth_cents = cents_between(smooth_freq, smooth_target)
-            status_txt = "AFINADO"
-
             with self.lock:
-                self.pending = {
-                    "active": True,
-                    "note": smooth_note,
-                    "freq": smooth_freq,
-                    "target": smooth_target,
-                    "cents": smooth_cents,
-                    "status": status_txt,
-                    "rms": rms,
-                    "clarity": clarity,
-                }
-                self.last_signal_time = time.time()
+                self.pending = (freq, rms, clarity)
 
         self.stream = sd.InputStream(
             device=DEVICE_ID,
@@ -808,39 +917,44 @@ class BwrldTunerApp(App):
         )
         self.stream.start()
 
+    def sync_pipeline(self):
+        """Alinha o pipeline com modo, preset e afinação de referência da UI."""
+        if self.pipeline.a4 != self.ui.a4:
+            self.pipeline.set_reference_pitch(self.ui.a4)
+
+        if self.ui.tuner_mode == "MANUAL" and self.ui.selected_preset:
+            self.pipeline.set_mode(self.ui.base_mode)
+            self.pipeline.lock_note(self.ui.selected_preset)
+        else:
+            self.pipeline.set_mode(self.ui.tuner_mode)
+
     def apply_audio_data(self, dt):
         with self.lock:
             data = self.pending
             self.pending = None
-            last_signal = self.last_signal_time
 
-        if getattr(self.ui, "needs_history_reset", False):
-            self.freq_history.clear()
-            self.cents_history.clear()
+        if self.ui.needs_history_reset:
             self.ui.needs_history_reset = False
+            self.sync_pipeline()
 
         if data is None:
-            if time.time() - last_signal > 0.75:
-                self.ui.set_idle()
-            return
+            # Sem bloco novo (áudio ~11 Hz, UI 45 Hz): só deixa o gate contar
+            # o tempo para eventualmente cair em STANDBY.
+            freq, rms, clarity = None, 0.0, self.last_clarity
+        else:
+            freq, rms, clarity = data
+            self.last_rms = float(rms)
+            self.last_clarity = float(clarity)
 
-        if not data.get("active"):
-            if time.time() - last_signal > 0.75:
-                self.freq_history.clear()
-                self.cents_history.clear()
-                self.ui.set_idle(data.get("rms", 0.0), data.get("clarity", 0.0))
-            return
+        result = self.pipeline.process(freq, rms, clarity)
 
-        self.ui.set_data(
-            data["note"],
-            data["freq"],
-            data["target"],
-            data["cents"],
-            data["status"],
-            data["rms"],
-            data["clarity"],
-            active=True,
-        )
+        if result is None:
+            return  # HOLD — mantém o último quadro na tela
+
+        if result.active:
+            self.ui.set_result(result, self.last_rms, self.last_clarity)
+        else:
+            self.ui.set_idle(self.last_rms, self.last_clarity)
 
     def on_stop(self):
         if hasattr(self, "stream"):
