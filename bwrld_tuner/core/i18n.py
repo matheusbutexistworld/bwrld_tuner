@@ -77,9 +77,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "LOCKED":     "TRAVADO",
         "MODE":       "MODO",
 
-        # Cabeçalho e rodapé
+        # Cabeçalho
         "APP_SUBTITLE": "AFINADOR CROMÁTICO",
-        "FOOTER_LEFT":  "BWRLD AUDIO ENGINE V6.2",
     },
     "en-US": {
         "PERFECT":        "PERFECT",
@@ -130,7 +129,6 @@ _STRINGS: dict[str, dict[str, str]] = {
         "MODE":       "MODE",
 
         "APP_SUBTITLE": "CHROMATIC TUNER",
-        "FOOTER_LEFT":  "BWRLD AUDIO ENGINE V6.2",
     },
 }
 

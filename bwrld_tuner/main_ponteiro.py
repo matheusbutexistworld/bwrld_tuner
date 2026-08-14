@@ -15,9 +15,10 @@ from tuner_pro import detectar_frequencia
 from core.i18n import DEFAULT_LANG, LANGUAGE_LABEL, next_language, t
 from core.pipeline import TunerPipeline
 from core.tunings import A4_STANDARD, REFERENCE_PITCHES, get_display_tuning, get_min_freq
+from core.version import ENGINE_LABEL, WINDOW_TITLE
 
 # ==========================================
-# BWRLD TUNER V6.2 - EXPERT SYSTEM EDITION
+# BWRLD TUNER V7 - ANALOG EDITION
 # ==========================================
 # Toda a lógica musical (notas, cents, status, suavização, gate) vive em core/
 # e é coberta por testes. Este arquivo é apenas áudio + desenho.
@@ -740,7 +741,7 @@ class BwrldTunerUI(Widget):
 
     def draw_footer(self, w, h):
         self._line([MARGEM, 34, w - MARGEM, 34], BORDER, 1.0)
-        self._text(t("FOOTER_LEFT", self.lang), MARGEM, 15, 9, STEEL, bold=True, align="left", cache=True)
+        self._text(ENGINE_LABEL, MARGEM, 15, 9, STEEL, bold=True, align="left", cache=True)
 
         # Estado do sinal fica sempre visível, mesmo com o painel oculto: é a
         # informação do painel esquerdo que você realmente precisa de relance
@@ -864,7 +865,7 @@ class BwrldTunerUI(Widget):
 
 class BwrldTunerApp(App):
     def build(self):
-        self.title = "BWRLD Tuner Pro"
+        self.title = WINDOW_TITLE
         self.ui = BwrldTunerUI()
 
         # A thread de áudio só entrega números crus. Toda a decisão musical

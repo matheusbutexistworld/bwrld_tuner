@@ -600,9 +600,10 @@ Porque junta:
 
 # Ordem recomendada de execução
 
-> **Status:** Sprints 1 a 4 concluídos. `main_ponteiro.py` já roda sobre `core/`,
-> com 86 testes cobrindo notas, tunings, engine, smoothing, gate e pipeline.
-> Próximo alvo: Sprint 5 (layout mobile).
+> **Status: V7 — Analog Edition.** Sprints 1 a 4 concluídos e a interface
+> refeita. `main_ponteiro.py` roda inteiro sobre `core/`, com 152 testes e 98%
+> de cobertura. Próximo alvo: cobrir a detecção de pitch (`tuner_pro.py`, hoje
+> o único 0%), depois Sprint 5 (layout mobile).
 
 ## Sprint 1 — Testes base
 
@@ -742,4 +743,20 @@ de cobertura restante e o próximo alvo natural antes do VST.
 
 ---
 
-A próxima coisa é a **lapidação da interface gráfica**, depois o Sprint 5.
+# V7 — Analog Edition
+
+Entregue depois do Sprint 4.5:
+
+```text
+Fita linear  substituiu o velocímetro de arco. Barra cresce do centro para o
+             lado do erro, detente no zero, zona afinada (±5 cents) acende.
+Tema         carvão quente / creme / verde-musgo / âmbar / tijolo. Saiu o neon.
+Tipografia   Bahnschrift (rótulos) + Consolas (números), com fallback para as
+             fontes que vêm no Kivy.
+Idioma       PT-BR / EN-US. O core devolve chaves, não texto de tela.
+Referência   A4 em 440 / 432 / 415 Hz, escalando todos os alvos.
+Painéis      sinal e cordas viraram ocultáveis, ocultos por padrão.
+Versão       centralizada em core/version.py.
+```
+
+A próxima coisa é **testar `tuner_pro.py`**, depois o Sprint 5.
